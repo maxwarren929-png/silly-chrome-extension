@@ -7,9 +7,9 @@
   let autoPrompt = "";
   let isScanning = false;
   let actionHistory = [];
-  const processedElements = new Set();
-  const groupIds = new WeakMap();
-  let groupIdCounter = 0;
+  const elementIdsMap = new WeakMap();
+  let idCounter = 0;
+  let interactablesMap = new Map(); // id -> element
 
   chrome.runtime.onMessage.addListener((message) => {
     if (message?.type === "OPEN_UI") {
@@ -45,6 +45,7 @@
 
   function addToLog(msg, type = "info") {
     const logEl = root.querySelector("#qa-log");
+    if (!logEl) return;
     logEl.style.display = "block";
     const entry = document.createElement("div");
     entry.className = `qa-log-entry qa-log-${type}`;
@@ -154,38 +155,45 @@
     actionHistory = [];
   }
 
+  let isWorking = false;
   async function scanLoop() {
-    if (!isScanning) return;
+    if (!isScanning || isWorking) return;
+    isWorking = true;
 
-    const task = detectNextTask();
-    if (task) {
-      if (currentMode === "pilot") {
-        await executePilotStep(task);
-      } else if (currentMode === "auto") {
-        await offerAutoStep(task);
+    try {
+      const task = gatherInteractables();
+      if (task.choices.length > 0) {
+        if (currentMode === "pilot") {
+          await executePilotStep(task);
+        } else if (currentMode === "auto") {
+          await offerAutoStep(task);
+        }
+      } else {
+        if (currentMode === "pilot") {
+          await executePilotStep({ task: "page", questionText: "No obvious interactables found. Reviewing page.", choices: [] });
+        }
       }
-    } else {
-      // If no obvious form/task, check for "Done" or general page state
-      if (currentMode === "pilot") {
-        await executePilotStep({ task: "page", questionText: "Reviewing page for next steps...", choices: [] });
+    } catch (e) {
+      console.error("Scan loop error:", e);
+      addToLog("Scan loop error, retrying...", "error");
+    } finally {
+      isWorking = false;
+      if (isScanning) {
+        setTimeout(scanLoop, 3000);
       }
-    }
-
-    if (isScanning) {
-      setTimeout(scanLoop, 3000); // 3s heartbeat
     }
   }
 
   async function executePilotStep(taskData) {
-    addToLog(`Thinking: ${taskData.questionText.slice(0, 30)}...`);
+    addToLog(`Thinking...`);
     const result = await askGroqForAction(taskData, autoPrompt);
     
     if (result.ok) {
-      if (!result.plan || !result.plan.action) {
+      const plan = result.plan;
+      if (!plan || !plan.action) {
         addToLog("Invalid response from AI", "error");
         return;
       }
-      const plan = result.plan;
       if (plan.action === "done") {
         addToLog("Goal reached! Deactivating Pilot.", "success");
         stopScanning();
@@ -203,7 +211,7 @@
         return;
       }
 
-      const success = applyAction(taskData, plan);
+      const success = applyAction(plan);
       if (success) {
         addToLog(`${plan.action.toUpperCase()}: ${plan.reason || "Executed"}`, "success");
         actionHistory.push(`${plan.action} on ${plan.targetId || "page"}: ${plan.reason}`);
@@ -217,25 +225,41 @@
 
   async function offerAutoStep(taskData) {
     const responseEl = root.querySelector("#qa-response");
+    if (!responseEl) return;
     responseEl.style.display = "block";
     responseEl.textContent = "Analyzing detected task...";
     
     const result = await askGroqForAction(taskData, autoPrompt);
     if (result.ok) {
-      if (!result.plan || !result.plan.action) {
+      const plan = result.plan;
+      if (!plan || !plan.action) {
         responseEl.textContent = "Invalid response from AI";
         return;
       }
-      const plan = result.plan;
-      responseEl.innerHTML = `
-        <div style="font-weight:600; margin-bottom:4px">Suggested: ${plan.action.toUpperCase()}</div>
-        <div style="font-size:0.85rem">${plan.reason}</div>
-        <button class="qa-primary-btn" id="qa-apply-btn" style="margin-top:8px; width:100%">Execute Action</button>
-      `;
-      responseEl.querySelector("#qa-apply-btn").addEventListener("click", () => {
-        applyAction(taskData, plan);
+
+      responseEl.innerHTML = "";
+      const header = document.createElement("div");
+      header.style.fontWeight = "600";
+      header.style.marginBottom = "4px";
+      header.textContent = `Suggested: ${plan.action.toUpperCase()}`;
+
+      const reason = document.createElement("div");
+      reason.style.fontSize = "0.85rem";
+      reason.textContent = plan.reason;
+
+      const btn = document.createElement("button");
+      btn.className = "qa-primary-btn";
+      btn.style.marginTop = "8px";
+      btn.style.width = "100%";
+      btn.textContent = "Execute Action";
+      btn.onclick = () => {
+        applyAction(plan);
         responseEl.style.display = "none";
-      });
+      };
+
+      responseEl.appendChild(header);
+      responseEl.appendChild(reason);
+      responseEl.appendChild(btn);
     }
   }
 
@@ -247,8 +271,8 @@
     btn.disabled = true;
     btn.textContent = "Analyzing...";
     
-    const task = detectNextTask();
-    if (!task) {
+    const task = gatherInteractables();
+    if (task.choices.length === 0) {
       btn.disabled = false;
       btn.textContent = "Scan & Solve";
       responseEl.textContent = "Nothing to interact with here.";
@@ -262,49 +286,66 @@
     
     if (result.ok) {
       const plan = result.plan;
-      responseEl.innerHTML = `
-        <div style="font-weight:600">Plan: ${plan.action}</div>
-        <div>${plan.reason}</div>
-        <button class="qa-primary-btn" id="qa-apply-btn" style="margin-top:8px; width:100%">Apply</button>
-      `;
-      responseEl.querySelector("#qa-apply-btn").addEventListener("click", () => {
-        applyAction(task, plan);
+      responseEl.innerHTML = "";
+      const header = document.createElement("div");
+      header.style.fontWeight = "600";
+      header.textContent = `Plan: ${plan.action}`;
+
+      const reason = document.createElement("div");
+      reason.textContent = plan.reason;
+
+      const applyBtn = document.createElement("button");
+      applyBtn.className = "qa-primary-btn";
+      applyBtn.style.marginTop = "8px";
+      applyBtn.style.width = "100%";
+      applyBtn.textContent = "Apply";
+      applyBtn.onclick = () => {
+        applyAction(plan);
         responseEl.style.display = "none";
-      });
+      };
+
+      responseEl.appendChild(header);
+      responseEl.appendChild(reason);
+      responseEl.appendChild(applyBtn);
     }
     responseEl.style.display = "block";
   }
 
-  function applyAction(taskData, plan) {
+  function applyAction(plan) {
     try {
-      let target = null;
-      if (plan.targetId) {
-        target = taskData.elementsById?.[plan.targetId];
-      } else if (taskData.inputEl) {
-        target = taskData.inputEl;
+      const target = interactablesMap.get(plan.targetId);
+      if (!target && plan.action !== "wait" && plan.action !== "done") {
+        console.error("Target not found for ID:", plan.targetId);
+        return false;
       }
 
-      if (!target && plan.action !== "wait" && plan.action !== "done") return false;
+      if (target) {
+        highlightElement(target);
+        target.scrollIntoView({ block: "center", behavior: "smooth" });
+      }
 
       if (plan.action === "click" || plan.action === "check") {
-        target.scrollIntoView({ block: "center" });
+        target.focus();
         target.click();
+        // Fire extra events for robustness
+        target.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+        target.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
         return true;
       }
 
       if (plan.action === "type") {
-        target.scrollIntoView({ block: "center" });
         target.focus();
         target.value = plan.text;
         target.dispatchEvent(new Event("input", { bubbles: true }));
         target.dispatchEvent(new Event("change", { bubbles: true }));
+        target.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "Enter" }));
         return true;
       }
 
       if (plan.action === "select") {
-        target.scrollIntoView({ block: "center" });
+        target.focus();
         const options = Array.from(target.options);
-        const best = options.find(o => o.text.includes(plan.optionText) || o.value.includes(plan.optionText)) || options[0];
+        const best = options.find(o => o.text.toLowerCase().includes(plan.optionText.toLowerCase()) || o.value.toLowerCase().includes(plan.optionText.toLowerCase())) || options[0];
         target.value = best.value;
         target.dispatchEvent(new Event("change", { bubbles: true }));
         return true;
@@ -317,106 +358,67 @@
     }
   }
 
+  function highlightElement(el) {
+    const originalOutline = el.style.outline;
+    el.style.outline = "3px solid #3b82f6";
+    el.style.outlineOffset = "2px";
+    setTimeout(() => {
+      if (el) el.style.outline = originalOutline;
+    }, 2000);
+  }
+
   async function askGroqForAction(taskData, userPrompt) {
     const visibleText = extractVisibleText();
-    // Strip non-serializable DOM elements before sending to background script
-    const { elementsById, primaryElement, inputEl, ...serializableTaskData } = taskData;
     return new Promise((resolve) => {
       chrome.runtime.sendMessage({
         type: "ASK_GROQ_ACTION",
         payload: {
-          ...serializableTaskData,
+          ...taskData,
           visibleText,
           userPrompt,
+          pageTitle: document.title,
           history: actionHistory
         }
       }, (resp) => {
         if (chrome.runtime.lastError) resolve({ ok: false, error: chrome.runtime.lastError.message });
-        else resolve(resp);
+        else resolve(resp || { ok: false, error: "Empty response from background script" });
       });
     });
   }
 
-  // --- Advanced Detection Logic ---
+  function gatherInteractables() {
+    interactablesMap.clear();
+    const choices = [];
+    const elements = document.querySelectorAll("input, textarea, select, button, a, [role='button']");
 
-  function detectNextTask() {
-    // Priority: 1. Forms/Inputs 2. MCQ 3. Checkboxes 4. Selects 5. Buttons
-    const task = detectTextInput() || detectMcq() || detectCheckboxes() || detectSelects() || detectImportantButtons();
-    if (task && processedElements.has(task.primaryElement)) return null; // Avoid spamming same element
-    if (task) task.primaryElement = task.primaryElement || task.inputEl || task.choices?.[0]?.el;
-    return task;
-  }
+    Array.from(elements).forEach((el) => {
+      if (!isInteractable(el)) return;
 
-  function detectMcq() {
-    const radios = Array.from(document.querySelectorAll('input[type="radio"]')).filter(isInteractable);
-    if (radios.length < 2) return null;
-    const group = radios[0].closest("fieldset") || radios[0].parentElement;
-    const elementsById = {};
-    const choices = radios.map((r, i) => {
-      const id = `radio_${i}`;
-      elementsById[id] = r;
-      const label = document.querySelector(`label[for="${r.id}"]`) || r.closest("label");
-      return { choiceId: id, text: (label?.innerText || "Option").trim() };
-    });
-    return { task: "mcq", questionText: group.innerText.slice(0, 300), choices, elementsById, primaryElement: radios[0] };
-  }
+      let id = elementIdsMap.get(el);
+      if (!id) {
+        id = `el_${idCounter++}`;
+        elementIdsMap.set(el, id);
+      }
+      interactablesMap.set(id, el);
 
-  function detectTextInput() {
-    const input = Array.from(document.querySelectorAll("input:not([type='radio']):not([type='checkbox']), textarea"))
-      .find(i => isInteractable(i) && !["submit", "button", "hidden"].includes(i.type));
-    if (!input) return null;
-    const label = document.querySelector(`label[for="${input.id}"]`) || input.closest("label");
-    return { 
-      task: "text", 
-      questionText: (label?.innerText || input.placeholder || "Enter text").trim(), 
-      inputEl: input, 
-      primaryElement: input 
-    };
-  }
+      let text = "";
+      if (el.tagName === "INPUT" || el.tagName === "TEXTAREA") {
+        const label = document.querySelector(`label[for="${el.id}"]`) || el.closest("label");
+        text = `[${el.type || 'text'}] ${label?.innerText || el.placeholder || el.name || 'Input'}`;
+      } else if (el.tagName === "SELECT") {
+        const label = document.querySelector(`label[for="${el.id}"]`) || el.closest("label");
+        text = `[select] ${label?.innerText || el.name || 'Dropdown'}`;
+      } else {
+        text = `[${el.tagName.toLowerCase()}] ${el.innerText || el.value || el.title || 'Clickable'}`;
+      }
 
-  function detectCheckboxes() {
-    const boxes = Array.from(document.querySelectorAll('input[type="checkbox"]')).filter(isInteractable);
-    if (boxes.length === 0) return null;
-    const elementsById = {};
-    const choices = boxes.map((b, i) => {
-      const id = `check_${i}`;
-      elementsById[id] = b;
-      const label = document.querySelector(`label[for="${b.id}"]`) || b.closest("label");
-      return { choiceId: id, text: (label?.innerText || "Checkbox").trim() };
-    });
-    return { task: "checkbox", questionText: "Check applicable options", choices, elementsById, primaryElement: boxes[0] };
-  }
-
-  function detectSelects() {
-    const select = Array.from(document.querySelectorAll("select")).find(isInteractable);
-    if (!select) return null;
-    const label = document.querySelector(`label[for="${select.id}"]`) || select.closest("label");
-    return { 
-      task: "select", 
-      questionText: (label?.innerText || "Select an option").trim(), 
-      elementsById: { select_0: select }, 
-      targetId: "select_0",
-      primaryElement: select 
-    };
-  }
-
-  function detectImportantButtons() {
-    const buttons = Array.from(document.querySelectorAll("button, input[type='submit'], a.btn, .button"))
-      .filter(b => isInteractable(b) && (b.innerText || b.value).length > 2);
-    
-    // Prioritize buttons like "Next", "Submit", "Continue", "Finish"
-    const important = buttons.find(b => {
-      const txt = (b.innerText || b.value || "").toLowerCase();
-      return txt.includes("next") || txt.includes("submit") || txt.includes("continue") || txt.includes("finish") || txt.includes("apply");
+      choices.push({ choiceId: id, text: text.trim().slice(0, 200) });
     });
 
-    if (!important) return null;
     return { 
-      task: "button", 
-      questionText: `Interact with button: ${important.innerText || important.value}`, 
-      choices: [{ choiceId: "btn_0", text: important.innerText || important.value }], 
-      elementsById: { btn_0: important },
-      primaryElement: important
+      task: "page_interaction",
+      questionText: "Identify the next logical interaction on this page.",
+      choices: choices.slice(0, 100)
     };
   }
 
@@ -425,11 +427,12 @@
     const style = window.getComputedStyle(el);
     if (style.display === "none" || style.visibility === "hidden" || style.opacity === "0") return false;
     const rect = el.getBoundingClientRect();
-    return rect.width > 0 && rect.height > 0;
+    if (rect.width === 0 || rect.height === 0) return false;
+    return true;
   }
 
   function extractVisibleText() {
-    return document.body.innerText.slice(0, 10000);
+    return document.body.innerText.slice(0, 8000);
   }
 
 })();

@@ -1,5 +1,5 @@
 const GROQ_ENDPOINT = "https://api.groq.com/openai/v1/chat/completions";
-const DEFAULT_MODEL = "llama-3.3-70b-versatile"; // Updated to supported model
+const DEFAULT_MODEL = "llama-3.3-70b-versatile";
 
 chrome.action.onClicked.addListener(async (tab) => {
   if (!tab.id || !tab.url || !/^https?:\/\//.test(tab.url)) return;
@@ -50,7 +50,6 @@ async function askGroqForAction(payload) {
     questionText,
     choices = [],
     visibleText,
-    pageText,
     pageTitle,
     userPrompt,
     history = []
@@ -63,42 +62,42 @@ async function askGroqForAction(payload) {
     CRITICAL RULES:
     1. Output ONLY valid JSON.
     2. Choose the most logical next action to move towards the goal.
-    3. If multiple tasks are visible, pick the most immediate one.
-    4. If the task is finished, return action: "done".
+    3. If multiple actions are possible, pick the one that progresses the task furthest.
+    4. If the goal is reached or no more actions are needed, return action: "done".
+    5. Be precise with "targetId" from the provided INTERACTABLE OPTIONS.
     
     ACTION TYPES:
-    - "click": For buttons, radios, or links. Requires "targetId" (from choices).
-    - "type": For text inputs. Requires "text" and "targetId".
-    - "check": For checkboxes. Requires "targetId".
-    - "select": For dropdowns. Requires "optionText" and "targetId".
-    - "wait": If you expect the page to change or load.
-    - "refuse": If you cannot proceed.
+    - "click": For buttons, links, or radio buttons.
+    - "type": For text inputs or textareas. Requires "text".
+    - "check": For checkboxes.
+    - "select": For dropdowns. Requires "optionText" (the text of the option to select).
+    - "wait": If you expect the page to load or change after an action.
+    - "refuse": If you are stuck or cannot proceed. Provide a reason.
     - "done": Goal reached.
 
     RESPONSE FORMAT:
     {
       "action": "click" | "type" | "check" | "select" | "wait" | "refuse" | "done",
-      "targetId": "...", 
+      "targetId": "el_...",
       "text": "...", 
       "optionText": "...",
       "confidence": 0.0 to 1.0,
-      "reason": "Explain your logic briefly"
+      "reason": "Briefly explain why this action moves towards the goal"
     }
   `;
 
   const userContent = `
-    PAGE: ${pageTitle}
-    CURRENT TASK DATA:
-    Type: ${task}
-    Description: ${questionText}
-    Target ID: ${payload.targetId || "multiple choices below"}
-    ${choices.length > 0 ? "INTERACTABLE OPTIONS:\n" + choices.map(c => `- ${c.choiceId}: ${c.text}`).join("\n") : ""}
+    PAGE TITLE: ${pageTitle}
+    TASK CONTEXT: ${questionText}
     
-    ACTION HISTORY:
-    ${history.length > 0 ? history.join("\n") : "None yet."}
+    INTERACTABLE OPTIONS (Visible Elements):
+    ${choices.length > 0 ? choices.map(c => `- ${c.choiceId}: ${c.text}`).join("\n") : "None visible."}
 
-    VISIBLE PAGE CONTEXT:
-    ${visibleText.slice(0, 8000)}
+    ACTION HISTORY (Previous Steps):
+    ${history.length > 0 ? history.slice(-5).join("\n") : "None yet."}
+
+    PAGE TEXT CONTENT (Truncated):
+    ${visibleText.slice(0, 5000)}
   `;
 
   const resp = await fetch(GROQ_ENDPOINT, {
