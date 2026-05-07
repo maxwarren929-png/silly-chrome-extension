@@ -1,5 +1,5 @@
 const GROQ_ENDPOINT = "https://api.groq.com/openai/v1/chat/completions";
-const DEFAULT_MODEL = "llama-3.3-70b-versatile"; // Updated to supported model
+const DEFAULT_MODEL = "llama-3.3-70b-versatile";
 
 chrome.action.onClicked.addListener(async (tab) => {
   if (!tab.id || !tab.url || !/^https?:\/\//.test(tab.url)) return;
@@ -42,15 +42,16 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 });
 
 async function askGroqForAction(payload) {
-  const { apiKey } = await chrome.storage.sync.get(["apiKey"]);
+  const { apiKey, selectedModel } = await chrome.storage.sync.get(["apiKey", "selectedModel"]);
   if (!apiKey) throw new Error("API Key missing. Set it in options.");
+
+  const model = selectedModel || DEFAULT_MODEL;
 
   const {
     task,
     questionText,
     choices = [],
     visibleText,
-    pageText,
     pageTitle,
     userPrompt,
     history = []
@@ -58,47 +59,53 @@ async function askGroqForAction(payload) {
 
   const systemPrompt = `
     You are an expert Web Pilot Agent. Your goal is to navigate and complete tasks on a webpage.
-    User Goal: ${userPrompt || "Complete all questions and tasks on this page."}
+    User Goal: ${userPrompt || "Explore the page and identify any tasks to complete."}
     
     CRITICAL RULES:
     1. Output ONLY valid JSON.
     2. Choose the most logical next action to move towards the goal.
-    3. If multiple tasks are visible, pick the most immediate one.
-    4. If the task is finished, return action: "done".
+    3. If multiple actions are possible, pick the one that progresses the task furthest.
+    4. If the goal is reached or no more actions are needed, return action: "done".
+    5. Be precise with "targetId" from the provided INTERACTABLE OPTIONS.
+    6. If you've tried an action and it didn't seem to work (check history), try a different approach or element.
     
     ACTION TYPES:
-    - "click": For buttons, radios, or links. Requires "targetId" (from choices).
-    - "type": For text inputs. Requires "text" and "targetId".
-    - "check": For checkboxes. Requires "targetId".
-    - "select": For dropdowns. Requires "optionText" and "targetId".
-    - "wait": If you expect the page to change or load.
-    - "refuse": If you cannot proceed.
+    - "click": For buttons, links, or radio buttons.
+    - "type": For text inputs or textareas. Requires "text".
+    - "check": For checkboxes.
+    - "select": For dropdowns. Requires "optionText".
+    - "scroll": To see more content. Requires "direction" ("down" or "up").
+    - "hover": To trigger tooltips or menus. Requires "targetId".
+    - "key": Press a specific key (e.g., "Enter", "Escape"). Requires "key" and optional "targetId".
+    - "wait": If you expect the page to load or change after an action.
+    - "refuse": If you are stuck or cannot proceed. Provide a reason.
     - "done": Goal reached.
 
     RESPONSE FORMAT:
     {
-      "action": "click" | "type" | "check" | "select" | "wait" | "refuse" | "done",
-      "targetId": "...", 
+      "action": "click" | "type" | "check" | "select" | "scroll" | "hover" | "key" | "wait" | "refuse" | "done",
+      "targetId": "el_...",
       "text": "...", 
       "optionText": "...",
+      "direction": "down" | "up",
+      "key": "...",
       "confidence": 0.0 to 1.0,
-      "reason": "Explain your logic briefly"
+      "reason": "Explain why this action moves towards the goal"
     }
   `;
 
   const userContent = `
-    PAGE: ${pageTitle}
-    CURRENT TASK DATA:
-    Type: ${task}
-    Description: ${questionText}
-    Target ID: ${payload.targetId || "multiple choices below"}
-    ${choices.length > 0 ? "INTERACTABLE OPTIONS:\n" + choices.map(c => `- ${c.choiceId}: ${c.text}`).join("\n") : ""}
-    
-    ACTION HISTORY:
-    ${history.length > 0 ? history.join("\n") : "None yet."}
+    PAGE TITLE: ${pageTitle}
+    TASK CONTEXT: ${questionText}
 
-    VISIBLE PAGE CONTEXT:
-    ${visibleText.slice(0, 8000)}
+    INTERACTABLE OPTIONS:
+    ${choices.length > 0 ? choices.map(c => `- ${c.choiceId}: ${c.text}`).join("\n") : "None visible."}
+    
+    ACTION HISTORY (Last 10 steps):
+    ${history.length > 0 ? history.slice(-10).join("\n") : "None yet."}
+
+    PAGE TEXT CONTENT (Truncated):
+    ${visibleText.slice(0, 6000)}
   `;
 
   const resp = await fetch(GROQ_ENDPOINT, {
@@ -108,7 +115,7 @@ async function askGroqForAction(payload) {
       Authorization: `Bearer ${apiKey}`
     },
     body: JSON.stringify({
-      model: DEFAULT_MODEL,
+      model: model,
       temperature: 0.1,
       messages: [
         { role: "system", content: systemPrompt },

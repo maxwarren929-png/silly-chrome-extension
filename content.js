@@ -6,10 +6,25 @@
   let currentMode = null;
   let autoPrompt = "";
   let isScanning = false;
+  let isPaused = false;
+  let scanInterval = 3000;
   let actionHistory = [];
-  const processedElements = new Set();
-  const groupIds = new WeakMap();
-  let groupIdCounter = 0;
+  const elementIdsMap = new WeakMap();
+  let idCounter = 0;
+  let interactablesMap = new Map(); // id -> element
+
+  // Load state on init
+  chrome.storage.local.get(["pilotState"], (res) => {
+    if (res.pilotState) {
+      const state = res.pilotState;
+      if (state.url === window.location.href) {
+        actionHistory = state.history || [];
+        autoPrompt = state.autoPrompt || "";
+        currentMode = state.mode;
+        scanInterval = state.scanInterval || 3000;
+      }
+    }
+  });
 
   chrome.runtime.onMessage.addListener((message) => {
     if (message?.type === "OPEN_UI") {
@@ -17,10 +32,33 @@
     }
   });
 
+  function saveState() {
+    try {
+      chrome.storage.local.set({
+        pilotState: {
+          url: window.location.href,
+          history: actionHistory,
+          autoPrompt: autoPrompt,
+          mode: currentMode,
+          isScanning: isScanning,
+          isPaused: isPaused,
+          scanInterval: scanInterval
+        }
+      });
+    } catch (e) {
+      console.error("Failed to save state", e);
+    }
+  }
+
   function toggleSidebar() {
     if (!root) createSidebar();
     root.style.display = root.style.display === "none" ? "block" : "none";
-    if (root.style.display === "block") showModePicker();
+    if (root.style.display === "block") {
+      if (currentMode === "pilot") showPilotUI();
+      else if (currentMode === "auto") showAutoUI();
+      else if (currentMode === "manual") showManualUI();
+      else showModePicker();
+    }
   }
 
   function createSidebar() {
@@ -29,35 +67,60 @@
     root.innerHTML = `
       <div class="qa-card">
         <div class="qa-header">
-          <div class="qa-title">Pilot Pro</div>
+          <div class="qa-title-row">
+            <div class="qa-title">Pilot Pro</div>
+            <div id="qa-badge" class="qa-badge">Idle</div>
+          </div>
           <button class="qa-close">×</button>
         </div>
         <div id="qa-content" class="qa-content"></div>
-        <div id="qa-log" class="qa-log" style="display:none"></div>
+        <div id="qa-log-container" style="display:none">
+          <div class="qa-log-header">
+            <span>Activity Log</span>
+            <button id="qa-clear-log" class="qa-text-btn">Clear</button>
+          </div>
+          <div id="qa-log" class="qa-log"></div>
+        </div>
       </div>
     `;
     document.body.appendChild(root);
     root.querySelector(".qa-close").addEventListener("click", () => {
       root.style.display = "none";
-      stopScanning();
+    });
+    root.querySelector("#qa-clear-log").addEventListener("click", () => {
+      const logEl = root.querySelector("#qa-log");
+      if (logEl) logEl.innerHTML = "";
+      actionHistory = [];
+      saveState();
     });
   }
 
+  function setBadge(text, type = "idle") {
+    if (!root) return;
+    const badge = root.querySelector("#qa-badge");
+    if (!badge) return;
+    badge.textContent = text;
+    badge.className = `qa-badge qa-badge-${type}`;
+  }
+
   function addToLog(msg, type = "info") {
+    if (!root) return;
+    const container = root.querySelector("#qa-log-container");
     const logEl = root.querySelector("#qa-log");
-    logEl.style.display = "block";
+    if (!logEl || !container) return;
+    container.style.display = "block";
     const entry = document.createElement("div");
     entry.className = `qa-log-entry qa-log-${type}`;
     entry.textContent = `> ${msg}`;
     logEl.prepend(entry);
-    if (logEl.childNodes.length > 20) logEl.lastChild.remove();
+    if (logEl.childNodes.length > 50) logEl.lastChild.remove();
   }
 
   function showModePicker() {
     currentMode = null;
     stopScanning();
     const content = root.querySelector("#qa-content");
-    root.querySelector("#qa-log").style.display = "none";
+    root.querySelector("#qa-log-container").style.display = "none";
     content.innerHTML = `
       <div class="qa-mode-picker">
         <button class="qa-mode-btn" data-mode="manual">
@@ -82,6 +145,7 @@
         else if (mode === "pilot") showPilotUI();
       });
     });
+    setBadge("Idle", "idle");
   }
 
   function showManualUI() {
@@ -97,6 +161,9 @@
     `;
     content.querySelector(".qa-back-btn").addEventListener("click", showModePicker);
     content.querySelector("#qa-solve-btn").addEventListener("click", onManualSolve);
+    const textarea = content.querySelector(".qa-textarea");
+    if (autoPrompt && currentMode === "manual") textarea.value = autoPrompt;
+    saveState();
   }
 
   function showAutoUI() {
@@ -106,15 +173,35 @@
       <div class="qa-auto-ui">
         <button class="qa-back-btn">← Modes</button>
         <textarea class="qa-textarea" placeholder="General rules (e.g. Always choose the cheapest option)"></textarea>
-        <button class="qa-primary-btn" id="qa-start-auto">Start Auto-Assist</button>
-        <div id="qa-auto-status" class="qa-status-box" style="display:none">
-          <span class="qa-status-dot active"></span> Monitoring page...
+        <div class="qa-settings-row">
+          <label>Interval: <span id="interval-val">${scanInterval/1000}</span>s</label>
+          <input type="range" id="scan-interval" min="1000" max="10000" step="500" value="${scanInterval}">
+        </div>
+        <div class="qa-controls">
+          <button class="qa-primary-btn" id="qa-start-auto">Start Auto-Assist</button>
+          <button class="qa-secondary-btn" id="qa-pause-btn" style="display:none">Pause</button>
+          <button class="qa-danger-btn" id="qa-stop-btn" style="display:none">Stop</button>
         </div>
         <div id="qa-response" class="qa-response" style="display:none"></div>
       </div>
     `;
     content.querySelector(".qa-back-btn").addEventListener("click", showModePicker);
     content.querySelector("#qa-start-auto").addEventListener("click", () => startScanning("auto"));
+    content.querySelector("#qa-stop-btn").addEventListener("click", stopScanning);
+    content.querySelector("#qa-pause-btn").addEventListener("click", togglePause);
+
+    const slider = content.querySelector("#scan-interval");
+    slider.addEventListener("input", (e) => {
+      scanInterval = parseInt(e.target.value);
+      content.querySelector("#interval-val").textContent = (scanInterval/1000).toFixed(1);
+      saveState();
+    });
+
+    const textarea = content.querySelector(".qa-textarea");
+    if (autoPrompt) textarea.value = autoPrompt;
+
+    if (isScanning) updateUIForScanning();
+    saveState();
   }
 
   function showPilotUI() {
@@ -124,72 +211,139 @@
       <div class="qa-pilot-ui">
         <button class="qa-back-btn">← Modes</button>
         <textarea class="qa-textarea" placeholder="Goal (e.g. Complete the enrollment form, buy the product, solve the quiz)"></textarea>
-        <button class="qa-primary-btn" id="qa-start-pilot">Activate Pilot Agent</button>
-        <div id="qa-pilot-status" class="qa-status-box" style="display:none">
-          <span class="qa-status-dot active"></span> Agent Active - Thinking...
+        <div class="qa-settings-row">
+          <label>Interval: <span id="interval-val">${scanInterval/1000}</span>s</label>
+          <input type="range" id="scan-interval" min="1000" max="10000" step="500" value="${scanInterval}">
+        </div>
+        <div class="qa-controls">
+          <button class="qa-primary-btn" id="qa-start-pilot">Activate Pilot</button>
+          <button class="qa-secondary-btn" id="qa-pause-btn" style="display:none">Pause</button>
+          <button class="qa-danger-btn" id="qa-stop-btn" style="display:none">Stop</button>
         </div>
       </div>
     `;
     content.querySelector(".qa-back-btn").addEventListener("click", showModePicker);
     content.querySelector("#qa-start-pilot").addEventListener("click", () => startScanning("pilot"));
+    content.querySelector("#qa-stop-btn").addEventListener("click", stopScanning);
+    content.querySelector("#qa-pause-btn").addEventListener("click", togglePause);
+
+    const slider = content.querySelector("#scan-interval");
+    slider.addEventListener("input", (e) => {
+      scanInterval = parseInt(e.target.value);
+      content.querySelector("#interval-val").textContent = (scanInterval/1000).toFixed(1);
+      saveState();
+    });
+
+    const textarea = content.querySelector(".qa-textarea");
+    if (autoPrompt) textarea.value = autoPrompt;
+
+    if (isScanning) updateUIForScanning();
+    saveState();
   }
 
   function startScanning(mode) {
     const textarea = root.querySelector(".qa-textarea");
-    const btn = mode === "auto" ? root.querySelector("#qa-start-auto") : root.querySelector("#qa-start-pilot");
-    const status = mode === "auto" ? root.querySelector("#qa-auto-status") : root.querySelector("#qa-pilot-status");
-    
-    autoPrompt = textarea.value.trim();
+    autoPrompt = textarea ? textarea.value.trim() : "";
     isScanning = true;
-    btn.style.display = "none";
-    textarea.disabled = true;
-    status.style.display = "flex";
+    isPaused = false;
+
+    updateUIForScanning();
     
     addToLog(`Pilot activated: ${autoPrompt || "Full Auto"}`);
+    saveState();
     scanLoop();
+  }
+
+  function updateUIForScanning() {
+    if (!root) return;
+    const startBtn = root.querySelector("#qa-start-auto") || root.querySelector("#qa-start-pilot");
+    const stopBtn = root.querySelector("#qa-stop-btn");
+    const pauseBtn = root.querySelector("#qa-pause-btn");
+    const textarea = root.querySelector(".qa-textarea");
+
+    if (startBtn) startBtn.style.display = "none";
+    if (stopBtn) stopBtn.style.display = "block";
+    if (pauseBtn) {
+      pauseBtn.style.display = "block";
+      pauseBtn.textContent = isPaused ? "Resume" : "Pause";
+    }
+    if (textarea) textarea.disabled = true;
+
+    setBadge(isPaused ? "Paused" : "Scanning", isPaused ? "idle" : "active");
+  }
+
+  function togglePause() {
+    isPaused = !isPaused;
+    const pauseBtn = root.querySelector("#qa-pause-btn");
+    if (pauseBtn) pauseBtn.textContent = isPaused ? "Resume" : "Pause";
+    setBadge(isPaused ? "Paused" : "Scanning", isPaused ? "idle" : "active");
+    addToLog(isPaused ? "Pilot paused." : "Pilot resumed.");
+    saveState();
   }
 
   function stopScanning() {
     isScanning = false;
-    actionHistory = [];
+    isPaused = false;
+
+    const startBtn = root.querySelector("#qa-start-auto") || root.querySelector("#qa-start-pilot");
+    const stopBtn = root.querySelector("#qa-stop-btn");
+    const pauseBtn = root.querySelector("#qa-pause-btn");
+    const textarea = root.querySelector(".qa-textarea");
+
+    if (startBtn) startBtn.style.display = "block";
+    if (stopBtn) stopBtn.style.display = "none";
+    if (pauseBtn) pauseBtn.style.display = "none";
+    if (textarea) textarea.disabled = false;
+
+    setBadge("Idle", "idle");
+    addToLog("Pilot stopped.");
+    saveState();
   }
 
+  let isWorking = false;
   async function scanLoop() {
     if (!isScanning) return;
-
-    const task = detectNextTask();
-    if (task) {
-      if (currentMode === "pilot") {
-        await executePilotStep(task);
-      } else if (currentMode === "auto") {
-        await offerAutoStep(task);
-      }
-    } else {
-      // If no obvious form/task, check for "Done" or general page state
-      if (currentMode === "pilot") {
-        await executePilotStep({ task: "page", questionText: "Reviewing page for next steps...", choices: [] });
-      }
+    if (isPaused || isWorking) {
+      setTimeout(scanLoop, 1000);
+      return;
     }
 
-    if (isScanning) {
-      setTimeout(scanLoop, 3000); // 3s heartbeat
+    isWorking = true;
+    setBadge("Thinking", "thinking");
+
+    try {
+      const task = gatherInteractables();
+      if (task.choices.length > 0 || currentMode === "pilot") {
+        if (currentMode === "pilot") {
+          await executePilotStep(task);
+        } else if (currentMode === "auto") {
+          await offerAutoStep(task);
+        }
+      }
+    } catch (e) {
+      console.error("Scan loop error:", e);
+      addToLog("Scan loop error, retrying...", "error");
+    } finally {
+      isWorking = false;
+      if (isScanning) {
+        if (!isPaused) setBadge("Scanning", "active");
+        setTimeout(scanLoop, scanInterval);
+      }
     }
   }
 
   async function executePilotStep(taskData) {
-    addToLog(`Thinking: ${taskData.questionText.slice(0, 30)}...`);
     const result = await askGroqForAction(taskData, autoPrompt);
     
     if (result.ok) {
-      if (!result.plan || !result.plan.action) {
+      const plan = result.plan;
+      if (!plan || !plan.action) {
         addToLog("Invalid response from AI", "error");
         return;
       }
-      const plan = result.plan;
       if (plan.action === "done") {
         addToLog("Goal reached! Deactivating Pilot.", "success");
         stopScanning();
-        showModePicker();
         return;
       }
       
@@ -203,10 +357,11 @@
         return;
       }
 
-      const success = applyAction(taskData, plan);
+      const success = await applyActionWithRetry(plan);
       if (success) {
         addToLog(`${plan.action.toUpperCase()}: ${plan.reason || "Executed"}`, "success");
         actionHistory.push(`${plan.action} on ${plan.targetId || "page"}: ${plan.reason}`);
+        saveState();
       } else {
         addToLog(`Failed to execute ${plan.action}`, "error");
       }
@@ -215,221 +370,237 @@
     }
   }
 
+  async function applyActionWithRetry(plan, retries = 2) {
+    for (let i = 0; i <= retries; i++) {
+      const success = applyAction(plan);
+      if (success) return true;
+      if (i < retries) {
+        addToLog(`Retrying ${plan.action}... (${i+1}/${retries})`, "info");
+        await new Promise(r => setTimeout(r, 1000));
+      }
+    }
+    return false;
+  }
+
   async function offerAutoStep(taskData) {
     const responseEl = root.querySelector("#qa-response");
+    if (!responseEl) return;
     responseEl.style.display = "block";
     responseEl.textContent = "Analyzing detected task...";
     
     const result = await askGroqForAction(taskData, autoPrompt);
     if (result.ok) {
-      if (!result.plan || !result.plan.action) {
+      const plan = result.plan;
+      if (!plan || !plan.action) {
         responseEl.textContent = "Invalid response from AI";
         return;
       }
-      const plan = result.plan;
-      responseEl.innerHTML = `
-        <div style="font-weight:600; margin-bottom:4px">Suggested: ${plan.action.toUpperCase()}</div>
-        <div style="font-size:0.85rem">${plan.reason}</div>
-        <button class="qa-primary-btn" id="qa-apply-btn" style="margin-top:8px; width:100%">Execute Action</button>
-      `;
-      responseEl.querySelector("#qa-apply-btn").addEventListener("click", () => {
-        applyAction(taskData, plan);
+
+      responseEl.innerHTML = "";
+      const header = document.createElement("div");
+      header.style.fontWeight = "600";
+      header.style.marginBottom = "4px";
+      header.textContent = `Suggested: ${plan.action.toUpperCase()}`;
+
+      const reason = document.createElement("div");
+      reason.style.fontSize = "0.85rem";
+      reason.textContent = plan.reason;
+
+      const btn = document.createElement("button");
+      btn.className = "qa-primary-btn";
+      btn.style.marginTop = "8px";
+      btn.style.width = "100%";
+      btn.textContent = "Execute Action";
+      btn.onclick = () => {
+        applyAction(plan);
         responseEl.style.display = "none";
-      });
+      };
+
+      responseEl.appendChild(header);
+      responseEl.appendChild(reason);
+      responseEl.appendChild(btn);
     }
   }
 
   async function onManualSolve() {
     const btn = root.querySelector("#qa-solve-btn");
     const responseEl = root.querySelector("#qa-response");
+    if (!btn || !responseEl) return;
     const prompt = root.querySelector(".qa-textarea").value.trim();
 
     btn.disabled = true;
     btn.textContent = "Analyzing...";
     
-    const task = detectNextTask();
-    if (!task) {
-      btn.disabled = false;
-      btn.textContent = "Scan & Solve";
-      responseEl.textContent = "Nothing to interact with here.";
-      responseEl.style.display = "block";
-      return;
-    }
-
+    const task = gatherInteractables();
     const result = await askGroqForAction(task, prompt);
     btn.disabled = false;
     btn.textContent = "Scan & Solve";
     
     if (result.ok) {
       const plan = result.plan;
-      responseEl.innerHTML = `
-        <div style="font-weight:600">Plan: ${plan.action}</div>
-        <div>${plan.reason}</div>
-        <button class="qa-primary-btn" id="qa-apply-btn" style="margin-top:8px; width:100%">Apply</button>
-      `;
-      responseEl.querySelector("#qa-apply-btn").addEventListener("click", () => {
-        applyAction(task, plan);
+      responseEl.innerHTML = "";
+      const header = document.createElement("div");
+      header.style.fontWeight = "600";
+      header.textContent = `Plan: ${plan.action}`;
+
+      const reason = document.createElement("div");
+      reason.textContent = plan.reason;
+
+      const applyBtn = document.createElement("button");
+      applyBtn.className = "qa-primary-btn";
+      applyBtn.style.marginTop = "8px";
+      applyBtn.style.width = "100%";
+      applyBtn.textContent = "Apply";
+      applyBtn.onclick = () => {
+        applyAction(plan);
         responseEl.style.display = "none";
-      });
+      };
+
+      responseEl.appendChild(header);
+      responseEl.appendChild(reason);
+      responseEl.appendChild(applyBtn);
     }
     responseEl.style.display = "block";
   }
 
-  function applyAction(taskData, plan) {
+  function applyAction(plan) {
     try {
-      let target = null;
-      if (plan.targetId) {
-        target = taskData.elementsById?.[plan.targetId];
-      } else if (taskData.inputEl) {
-        target = taskData.inputEl;
+      const target = interactablesMap.get(plan.targetId);
+
+      if (!target && !["wait", "done", "scroll", "refuse"].includes(plan.action)) {
+        console.error("Target not found for ID:", plan.targetId);
+        return false;
       }
 
-      if (!target && plan.action !== "wait" && plan.action !== "done") return false;
-
-      if (plan.action === "click" || plan.action === "check") {
-        target.scrollIntoView({ block: "center" });
-        target.click();
-        return true;
+      if (target) {
+        highlightElement(target);
+        target.scrollIntoView({ block: "center", behavior: "smooth" });
       }
 
-      if (plan.action === "type") {
-        target.scrollIntoView({ block: "center" });
-        target.focus();
-        target.value = plan.text;
-        target.dispatchEvent(new Event("input", { bubbles: true }));
-        target.dispatchEvent(new Event("change", { bubbles: true }));
-        return true;
+      switch(plan.action) {
+        case "click":
+        case "check":
+          target.focus();
+          target.click();
+          target.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+          target.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+          return true;
+        case "type":
+          target.focus();
+          target.value = plan.text;
+          target.dispatchEvent(new Event("input", { bubbles: true }));
+          target.dispatchEvent(new Event("change", { bubbles: true }));
+          return true;
+        case "select":
+          target.focus();
+          const options = Array.from(target.options);
+          const val = plan.optionText || plan.text;
+          const best = options.find(o => o.text.toLowerCase().includes(val.toLowerCase()) || o.value.toLowerCase().includes(val.toLowerCase())) || options[0];
+          target.value = best.value;
+          target.dispatchEvent(new Event("change", { bubbles: true }));
+          return true;
+        case "scroll":
+          const amount = plan.direction === "up" ? -window.innerHeight * 0.7 : window.innerHeight * 0.7;
+          window.scrollBy({ top: amount, behavior: "smooth" });
+          return true;
+        case "hover":
+          target.dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
+          target.dispatchEvent(new MouseEvent("mouseenter", { bubbles: true }));
+          return true;
+        case "key":
+          target.focus();
+          const key = plan.key || "Enter";
+          target.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: key }));
+          target.dispatchEvent(new KeyboardEvent("keyup", { bubbles: true, key: key }));
+          return true;
+        case "wait":
+          return true;
+        case "done":
+          return true;
+        default:
+          return false;
       }
-
-      if (plan.action === "select") {
-        target.scrollIntoView({ block: "center" });
-        const options = Array.from(target.options);
-        const best = options.find(o => o.text.includes(plan.optionText) || o.value.includes(plan.optionText)) || options[0];
-        target.value = best.value;
-        target.dispatchEvent(new Event("change", { bubbles: true }));
-        return true;
-      }
-
-      return true;
     } catch (e) {
       console.error("Action execution failed", e);
       return false;
     }
   }
 
+  function highlightElement(el) {
+    const originalOutline = el.style.outline;
+    el.style.outline = "3px solid #3b82f6";
+    el.style.outlineOffset = "2px";
+    setTimeout(() => {
+      if (el && el.isConnected) el.style.outline = originalOutline;
+    }, 2000);
+  }
+
   async function askGroqForAction(taskData, userPrompt) {
     const visibleText = extractVisibleText();
-    // Strip non-serializable DOM elements before sending to background script
-    const { elementsById, primaryElement, inputEl, ...serializableTaskData } = taskData;
     return new Promise((resolve) => {
       chrome.runtime.sendMessage({
         type: "ASK_GROQ_ACTION",
         payload: {
-          ...serializableTaskData,
+          ...taskData,
           visibleText,
           userPrompt,
+          pageTitle: document.title,
           history: actionHistory
         }
       }, (resp) => {
         if (chrome.runtime.lastError) resolve({ ok: false, error: chrome.runtime.lastError.message });
-        else resolve(resp);
+        else resolve(resp || { ok: false, error: "Empty response from background script" });
       });
     });
   }
 
-  // --- Advanced Detection Logic ---
+  function gatherInteractables() {
+    interactablesMap.clear();
+    const choices = [];
+    const elements = document.querySelectorAll("input, textarea, select, button, a, [role='button'], summary");
 
-  function detectNextTask() {
-    // Priority: 1. Forms/Inputs 2. MCQ 3. Checkboxes 4. Selects 5. Buttons
-    const task = detectTextInput() || detectMcq() || detectCheckboxes() || detectSelects() || detectImportantButtons();
-    if (task && processedElements.has(task.primaryElement)) return null; // Avoid spamming same element
-    if (task) task.primaryElement = task.primaryElement || task.inputEl || task.choices?.[0]?.el;
-    return task;
-  }
+    Array.from(elements).forEach((el) => {
+      if (!isInteractable(el)) return;
 
-  function detectMcq() {
-    const radios = Array.from(document.querySelectorAll('input[type="radio"]')).filter(isInteractable);
-    if (radios.length < 2) return null;
-    const group = radios[0].closest("fieldset") || radios[0].parentElement;
-    const elementsById = {};
-    const choices = radios.map((r, i) => {
-      const id = `radio_${i}`;
-      elementsById[id] = r;
-      const label = document.querySelector(`label[for="${r.id}"]`) || r.closest("label");
-      return { choiceId: id, text: (label?.innerText || "Option").trim() };
-    });
-    return { task: "mcq", questionText: group.innerText.slice(0, 300), choices, elementsById, primaryElement: radios[0] };
-  }
+      let id = elementIdsMap.get(el);
+      if (!id) {
+        id = `el_${idCounter++}`;
+        elementIdsMap.set(el, id);
+      }
+      interactablesMap.set(id, el);
 
-  function detectTextInput() {
-    const input = Array.from(document.querySelectorAll("input:not([type='radio']):not([type='checkbox']), textarea"))
-      .find(i => isInteractable(i) && !["submit", "button", "hidden"].includes(i.type));
-    if (!input) return null;
-    const label = document.querySelector(`label[for="${input.id}"]`) || input.closest("label");
-    return { 
-      task: "text", 
-      questionText: (label?.innerText || input.placeholder || "Enter text").trim(), 
-      inputEl: input, 
-      primaryElement: input 
-    };
-  }
+      let text = "";
+      if (el.tagName === "INPUT" || el.tagName === "TEXTAREA") {
+        const label = document.querySelector(`label[for="${el.id}"]`) || el.closest("label");
+        text = `[${el.type || 'text'}] ${label?.innerText || el.placeholder || el.name || 'Input'}`;
+      } else if (el.tagName === "SELECT") {
+        const label = document.querySelector(`label[for="${el.id}"]`) || el.closest("label");
+        text = `[select] ${label?.innerText || el.name || 'Dropdown'}`;
+      } else {
+        text = `[${el.tagName.toLowerCase()}] ${el.innerText || el.value || el.title || 'Clickable'}`;
+      }
 
-  function detectCheckboxes() {
-    const boxes = Array.from(document.querySelectorAll('input[type="checkbox"]')).filter(isInteractable);
-    if (boxes.length === 0) return null;
-    const elementsById = {};
-    const choices = boxes.map((b, i) => {
-      const id = `check_${i}`;
-      elementsById[id] = b;
-      const label = document.querySelector(`label[for="${b.id}"]`) || b.closest("label");
-      return { choiceId: id, text: (label?.innerText || "Checkbox").trim() };
-    });
-    return { task: "checkbox", questionText: "Check applicable options", choices, elementsById, primaryElement: boxes[0] };
-  }
-
-  function detectSelects() {
-    const select = Array.from(document.querySelectorAll("select")).find(isInteractable);
-    if (!select) return null;
-    const label = document.querySelector(`label[for="${select.id}"]`) || select.closest("label");
-    return { 
-      task: "select", 
-      questionText: (label?.innerText || "Select an option").trim(), 
-      elementsById: { select_0: select }, 
-      targetId: "select_0",
-      primaryElement: select 
-    };
-  }
-
-  function detectImportantButtons() {
-    const buttons = Array.from(document.querySelectorAll("button, input[type='submit'], a.btn, .button"))
-      .filter(b => isInteractable(b) && (b.innerText || b.value).length > 2);
-    
-    // Prioritize buttons like "Next", "Submit", "Continue", "Finish"
-    const important = buttons.find(b => {
-      const txt = (b.innerText || b.value || "").toLowerCase();
-      return txt.includes("next") || txt.includes("submit") || txt.includes("continue") || txt.includes("finish") || txt.includes("apply");
+      choices.push({ choiceId: id, text: text.trim().slice(0, 200) });
     });
 
-    if (!important) return null;
     return { 
-      task: "button", 
-      questionText: `Interact with button: ${important.innerText || important.value}`, 
-      choices: [{ choiceId: "btn_0", text: important.innerText || important.value }], 
-      elementsById: { btn_0: important },
-      primaryElement: important
+      task: "page_interaction",
+      questionText: "Identify the next logical interaction on this page.",
+      choices: choices.slice(0, 100)
     };
   }
 
   function isInteractable(el) {
     if (el.closest("#page-qa-root")) return false;
     const style = window.getComputedStyle(el);
-    if (style.display === "none" || style.visibility === "hidden" || style.opacity === "0") return false;
+    if (style.display === "none" || style.visibility === "hidden" || parseFloat(style.opacity) === 0) return false;
     const rect = el.getBoundingClientRect();
-    return rect.width > 0 && rect.height > 0;
+    if (rect.width === 0 || rect.height === 0) return false;
+    return true;
   }
 
   function extractVisibleText() {
-    return document.body.innerText.slice(0, 10000);
+    return document.body.innerText.slice(0, 8000);
   }
 
 })();
