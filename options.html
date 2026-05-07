@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Page QA Settings</title>
+    <style>
+      body {
+        font-family: "Segoe UI", system-ui, sans-serif;
+        margin: 24px;
+        max-width: 500px;
+        color: #1e293b;
+        background: #f8fafc;
+      }
+      .card {
+        background: white;
+        border-radius: 12px;
+        padding: 24px;
+        box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1);
+        border: 1px solid #e2e8f0;
+      }
+      h1 {
+        margin: 0 0 20px 0;
+        font-size: 1.25rem;
+        font-weight: 600;
+        color: #0f172a;
+      }
+      .field {
+        margin-bottom: 16px;
+      }
+      label {
+        display: block;
+        margin-bottom: 6px;
+        font-size: 0.875rem;
+        font-weight: 500;
+      }
+      input {
+        width: 100%;
+        padding: 8px 12px;
+        border-radius: 6px;
+        border: 1px solid #cbd5e1;
+        font-size: 0.875rem;
+        box-sizing: border-box;
+      }
+      input:focus {
+        outline: 2px solid #3b82f6;
+        border-color: transparent;
+      }
+      button {
+        width: 100%;
+        padding: 10px;
+        border-radius: 6px;
+        border: 0;
+        background: #3b82f6;
+        color: white;
+        font-weight: 600;
+        cursor: pointer;
+        transition: background 0.2s;
+      }
+      button:hover {
+        background: #2563eb;
+      }
+      #status {
+        margin-top: 12px;
+        font-size: 0.875rem;
+        text-align: center;
+        height: 20px;
+      }
+      .hint {
+        font-size: 0.75rem;
+        color: #64748b;
+        margin-top: 4px;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <h1>Extension Settings</h1>
+      <div class="field">
+        <label for="apiKey">Groq API Key</label>
+        <input id="apiKey" type="password" placeholder="gsk_..." />
+        <div class="hint">Enter your API key from console.groq.com</div>
+      </div>
+      <button id="saveBtn">Save Settings</button>
+      <div id="status"></div>
+    </div>
+    <script src="options.js"></script>
+  </body>
+</html>
