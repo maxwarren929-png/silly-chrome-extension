@@ -54,45 +54,66 @@ async function askGroqForAction(payload) {
     visibleText,
     pageTitle,
     userPrompt,
-    history = []
+    history = [],
+    answerOnly = false
   } = payload;
 
-  const systemPrompt = `
-    You are an expert Web Pilot Agent. Your goal is to navigate and complete tasks on a webpage.
-    User Goal: ${userPrompt || "Explore the page and identify any tasks to complete."}
-    
-    CRITICAL RULES:
-    1. Output ONLY valid JSON.
-    2. Choose the most logical next action to move towards the goal.
-    3. If multiple actions are possible, pick the one that progresses the task furthest.
-    4. If the goal is reached or no more actions are needed, return action: "done".
-    5. Be precise with "targetId" from the provided INTERACTABLE OPTIONS.
-    6. If you've tried an action and it didn't seem to work (check history), try a different approach or element.
-    
-    ACTION TYPES:
-    - "click": For buttons, links, or radio buttons.
-    - "type": For text inputs or textareas. Requires "text".
-    - "check": For checkboxes.
-    - "select": For dropdowns. Requires "optionText".
-    - "scroll": To see more content. Requires "direction" ("down" or "up").
-    - "hover": To trigger tooltips or menus. Requires "targetId".
-    - "key": Press a specific key (e.g., "Enter", "Escape"). Requires "key" and optional "targetId".
-    - "wait": If you expect the page to load or change after an action.
-    - "refuse": If you are stuck or cannot proceed. Provide a reason.
-    - "done": Goal reached.
+  let systemPrompt = "";
+  if (answerOnly) {
+    systemPrompt = `
+      You are a helpful web assistant. Your goal is to answer the user's question or provide information based on the current webpage content.
 
-    RESPONSE FORMAT:
-    {
-      "action": "click" | "type" | "check" | "select" | "scroll" | "hover" | "key" | "wait" | "refuse" | "done",
-      "targetId": "el_...",
-      "text": "...", 
-      "optionText": "...",
-      "direction": "down" | "up",
-      "key": "...",
-      "confidence": 0.0 to 1.0,
-      "reason": "Explain why this action moves towards the goal"
-    }
-  `;
+      User Question: ${userPrompt || "What is this page about?"}
+
+      CRITICAL RULES:
+      1. Output ONLY valid JSON.
+      2. Provide a direct, concise answer.
+      3. Use the provided page content and interactable options to inform your answer.
+
+      RESPONSE FORMAT:
+      {
+        "answer": "Your detailed answer here",
+        "reason": "Brief explanation of how you found the answer"
+      }
+    `;
+  } else {
+    systemPrompt = `
+      You are an expert Web Pilot Agent. Your goal is to navigate and complete tasks on a webpage.
+      User Goal: ${userPrompt || "Explore the page and identify any tasks to complete."}
+
+      CRITICAL RULES:
+      1. Output ONLY valid JSON.
+      2. Choose the most logical next action to move towards the goal.
+      3. If multiple actions are possible, pick the one that progresses the task furthest.
+      4. If the goal is reached or no more actions are needed, return action: "done".
+      5. Be precise with "targetId" from the provided INTERACTABLE OPTIONS.
+      6. If you've tried an action and it didn't seem to work (check history), try a different approach or element.
+
+      ACTION TYPES:
+      - "click": For buttons, links, or radio buttons.
+      - "type": For text inputs or textareas. Requires "text".
+      - "check": For checkboxes.
+      - "select": For dropdowns. Requires "optionText".
+      - "scroll": To see more content. Requires "direction" ("down" or "up").
+      - "hover": To trigger tooltips or menus. Requires "targetId".
+      - "key": Press a specific key (e.g., "Enter", "Escape"). Requires "key" and optional "targetId".
+      - "wait": If you expect the page to load or change after an action.
+      - "refuse": If you are stuck or cannot proceed. Provide a reason.
+      - "done": Goal reached.
+
+      RESPONSE FORMAT:
+      {
+        "action": "click" | "type" | "check" | "select" | "scroll" | "hover" | "key" | "wait" | "refuse" | "done",
+        "targetId": "el_...",
+        "text": "...",
+        "optionText": "...",
+        "direction": "down" | "up",
+        "key": "...",
+        "confidence": 0.0 to 1.0,
+        "reason": "Explain why this action moves towards the goal"
+      }
+    `;
+  }
 
   const userContent = `
     PAGE TITLE: ${pageTitle}

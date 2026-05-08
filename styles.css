@@ -23,6 +23,7 @@
   font-family: var(--qa-font);
   color: var(--qa-text);
   line-height: 1.5;
+  cursor: default;
 }
 
 .qa-card {
@@ -34,6 +35,35 @@
   flex-direction: column;
   max-height: 90vh;
   overflow: hidden;
+  position: relative;
+}
+
+#page-qa-root.minimalist {
+  width: 300px;
+  min-width: 200px;
+  min-height: 150px;
+  resize: both;
+  overflow: hidden;
+  top: auto;
+  bottom: 20px;
+  right: 20px;
+}
+
+#page-qa-root.minimalist .qa-card {
+  height: 100%;
+  max-height: none;
+}
+
+#page-qa-root.minimalist .qa-title {
+  font-size: 0.9rem;
+}
+
+#page-qa-root.minimalist .qa-content {
+  padding: 12px;
+}
+
+#page-qa-root.minimalist .qa-textarea {
+  min-height: 60px;
 }
 
 .qa-header {
@@ -43,6 +73,8 @@
   display: flex;
   justify-content: space-between;
   align-items: center;
+  cursor: move;
+  user-select: none;
 }
 
 .qa-title-row {
