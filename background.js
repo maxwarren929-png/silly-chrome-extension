@@ -42,8 +42,10 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 });
 
 async function askGroqForAction(payload) {
-  const { apiKey } = await chrome.storage.sync.get(["apiKey"]);
+  const { apiKey, selectedModel } = await chrome.storage.sync.get(["apiKey", "selectedModel"]);
   if (!apiKey) throw new Error("API Key missing. Set it in options.");
+
+  const model = selectedModel || DEFAULT_MODEL;
 
   const {
     task,
@@ -57,7 +59,7 @@ async function askGroqForAction(payload) {
 
   const systemPrompt = `
     You are an expert Web Pilot Agent. Your goal is to navigate and complete tasks on a webpage.
-    User Goal: ${userPrompt || "Complete all questions and tasks on this page."}
+    User Goal: ${userPrompt || "Explore the page and identify any tasks to complete."}
     
     CRITICAL RULES:
     1. Output ONLY valid JSON.
@@ -65,39 +67,45 @@ async function askGroqForAction(payload) {
     3. If multiple actions are possible, pick the one that progresses the task furthest.
     4. If the goal is reached or no more actions are needed, return action: "done".
     5. Be precise with "targetId" from the provided INTERACTABLE OPTIONS.
+    6. If you've tried an action and it didn't seem to work (check history), try a different approach or element.
     
     ACTION TYPES:
     - "click": For buttons, links, or radio buttons.
     - "type": For text inputs or textareas. Requires "text".
     - "check": For checkboxes.
-    - "select": For dropdowns. Requires "optionText" (the text of the option to select).
+    - "select": For dropdowns. Requires "optionText".
+    - "scroll": To see more content. Requires "direction" ("down" or "up").
+    - "hover": To trigger tooltips or menus. Requires "targetId".
+    - "key": Press a specific key (e.g., "Enter", "Escape"). Requires "key" and optional "targetId".
     - "wait": If you expect the page to load or change after an action.
     - "refuse": If you are stuck or cannot proceed. Provide a reason.
     - "done": Goal reached.
 
     RESPONSE FORMAT:
     {
-      "action": "click" | "type" | "check" | "select" | "wait" | "refuse" | "done",
+      "action": "click" | "type" | "check" | "select" | "scroll" | "hover" | "key" | "wait" | "refuse" | "done",
       "targetId": "el_...",
       "text": "...", 
       "optionText": "...",
+      "direction": "down" | "up",
+      "key": "...",
       "confidence": 0.0 to 1.0,
-      "reason": "Briefly explain why this action moves towards the goal"
+      "reason": "Explain why this action moves towards the goal"
     }
   `;
 
   const userContent = `
     PAGE TITLE: ${pageTitle}
     TASK CONTEXT: ${questionText}
-    
-    INTERACTABLE OPTIONS (Visible Elements):
+
+    INTERACTABLE OPTIONS:
     ${choices.length > 0 ? choices.map(c => `- ${c.choiceId}: ${c.text}`).join("\n") : "None visible."}
 
-    ACTION HISTORY (Previous Steps):
-    ${history.length > 0 ? history.slice(-5).join("\n") : "None yet."}
+    ACTION HISTORY (Last 10 steps):
+    ${history.length > 0 ? history.slice(-10).join("\n") : "None yet."}
 
     PAGE TEXT CONTENT (Truncated):
-    ${visibleText.slice(0, 5000)}
+    ${visibleText.slice(0, 6000)}
   `;
 
   const resp = await fetch(GROQ_ENDPOINT, {
@@ -107,7 +115,7 @@ async function askGroqForAction(payload) {
       Authorization: `Bearer ${apiKey}`
     },
     body: JSON.stringify({
-      model: DEFAULT_MODEL,
+      model: model,
       temperature: 0.1,
       messages: [
         { role: "system", content: systemPrompt },
