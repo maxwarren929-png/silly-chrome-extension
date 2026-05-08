@@ -4,6 +4,7 @@
 
   let root = null;
   let currentMode = null;
+  let interfaceMode = "sidebar";
   let autoPrompt = "";
   let isScanning = false;
   let isPaused = false;
@@ -50,8 +51,19 @@
     }
   }
 
-  function toggleSidebar() {
+  async function toggleSidebar() {
+    const settings = await chrome.storage.sync.get(["interfaceMode"]);
+    interfaceMode = settings.interfaceMode || "sidebar";
+
     if (!root) createSidebar();
+
+    // Apply interface mode class
+    if (interfaceMode === "minimalist") {
+      root.classList.add("minimalist");
+    } else {
+      root.classList.remove("minimalist");
+    }
+
     root.style.display = root.style.display === "none" ? "block" : "none";
     if (root.style.display === "block") {
       if (currentMode === "pilot") showPilotUI();
@@ -84,6 +96,8 @@
       </div>
     `;
     document.body.appendChild(root);
+    makeDraggable(root);
+
     root.querySelector(".qa-close").addEventListener("click", () => {
       root.style.display = "none";
     });
@@ -93,6 +107,38 @@
       actionHistory = [];
       saveState();
     });
+  }
+
+  function makeDraggable(el) {
+    const header = el.querySelector(".qa-header");
+    let pos1 = 0, pos2 = 0, pos3 = 0, pos4 = 0;
+
+    header.onmousedown = dragMouseDown;
+
+    function dragMouseDown(e) {
+      e.preventDefault();
+      pos3 = e.clientX;
+      pos4 = e.clientY;
+      document.onmouseup = closeDragElement;
+      document.onmousemove = elementDrag;
+    }
+
+    function elementDrag(e) {
+      e.preventDefault();
+      pos1 = pos3 - e.clientX;
+      pos2 = pos4 - e.clientY;
+      pos3 = e.clientX;
+      pos4 = e.clientY;
+      el.style.top = (el.offsetTop - pos2) + "px";
+      el.style.left = (el.offsetLeft - pos1) + "px";
+      el.style.right = "auto";
+      el.style.bottom = "auto";
+    }
+
+    function closeDragElement() {
+      document.onmouseup = null;
+      document.onmousemove = null;
+    }
   }
 
   function setBadge(text, type = "idle") {
@@ -386,39 +432,21 @@
     const responseEl = root.querySelector("#qa-response");
     if (!responseEl) return;
     responseEl.style.display = "block";
-    responseEl.textContent = "Analyzing detected task...";
+    responseEl.textContent = "Thinking...";
     
-    const result = await askGroqForAction(taskData, autoPrompt);
+    const result = await askGroqForAction(taskData, autoPrompt, true); // true for answer only
     if (result.ok) {
       const plan = result.plan;
-      if (!plan || !plan.action) {
-        responseEl.textContent = "Invalid response from AI";
+      if (!plan) {
+        responseEl.textContent = "No response from AI";
         return;
       }
 
       responseEl.innerHTML = "";
-      const header = document.createElement("div");
-      header.style.fontWeight = "600";
-      header.style.marginBottom = "4px";
-      header.textContent = `Suggested: ${plan.action.toUpperCase()}`;
-
-      const reason = document.createElement("div");
-      reason.style.fontSize = "0.85rem";
-      reason.textContent = plan.reason;
-
-      const btn = document.createElement("button");
-      btn.className = "qa-primary-btn";
-      btn.style.marginTop = "8px";
-      btn.style.width = "100%";
-      btn.textContent = "Execute Action";
-      btn.onclick = () => {
-        applyAction(plan);
-        responseEl.style.display = "none";
-      };
-
-      responseEl.appendChild(header);
-      responseEl.appendChild(reason);
-      responseEl.appendChild(btn);
+      const answer = document.createElement("div");
+      answer.style.fontSize = "0.9rem";
+      answer.textContent = plan.answer || plan.reason;
+      responseEl.appendChild(answer);
     }
   }
 
@@ -429,44 +457,22 @@
     const prompt = root.querySelector(".qa-textarea").value.trim();
 
     btn.disabled = true;
-    btn.textContent = "Analyzing...";
+    btn.textContent = "Thinking...";
     
     const task = gatherInteractables();
-    if (task.choices.length === 0) {
-      btn.disabled = false;
-      btn.textContent = "Scan & Solve";
-      responseEl.textContent = "Nothing to interact with here.";
-      responseEl.style.display = "block";
-      return;
-    }
-
-    const result = await askGroqForAction(task, prompt);
+    const result = await askGroqForAction(task, prompt, true); // true for answer only
     btn.disabled = false;
     btn.textContent = "Scan & Solve";
     
     if (result.ok) {
       const plan = result.plan;
       responseEl.innerHTML = "";
-      const header = document.createElement("div");
-      header.style.fontWeight = "600";
-      header.textContent = `Plan: ${plan.action}`;
-
-      const reason = document.createElement("div");
-      reason.textContent = plan.reason;
-
-      const applyBtn = document.createElement("button");
-      applyBtn.className = "qa-primary-btn";
-      applyBtn.style.marginTop = "8px";
-      applyBtn.style.width = "100%";
-      applyBtn.textContent = "Apply";
-      applyBtn.onclick = () => {
-        applyAction(plan);
-        responseEl.style.display = "none";
-      };
-
-      responseEl.appendChild(header);
-      responseEl.appendChild(reason);
-      responseEl.appendChild(applyBtn);
+      const answer = document.createElement("div");
+      answer.style.fontSize = "0.9rem";
+      answer.textContent = plan.answer || plan.reason;
+      responseEl.appendChild(answer);
+    } else {
+      responseEl.textContent = "Error: " + result.error;
     }
     responseEl.style.display = "block";
   }
@@ -489,14 +495,19 @@
         case "click":
         case "check":
           target.focus();
+          target.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, view: window, cancelable: true }));
+          target.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, view: window, cancelable: true }));
           target.click();
-          target.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
-          target.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
           return true;
         case "type":
           target.focus();
-          target.value = plan.text;
-          target.dispatchEvent(new Event("input", { bubbles: true }));
+          target.value = ""; // Clear first
+          for (let char of plan.text) {
+            target.value += char;
+            target.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: char }));
+            target.dispatchEvent(new KeyboardEvent("keypress", { bubbles: true, key: char }));
+            target.dispatchEvent(new Event("input", { bubbles: true }));
+          }
           target.dispatchEvent(new Event("change", { bubbles: true }));
           return true;
         case "select":
@@ -543,7 +554,7 @@
     }, 2000);
   }
 
-  async function askGroqForAction(taskData, userPrompt) {
+  async function askGroqForAction(taskData, userPrompt, answerOnly = false) {
     const visibleText = extractVisibleText();
     return new Promise((resolve) => {
       chrome.runtime.sendMessage({
@@ -553,7 +564,8 @@
           visibleText,
           userPrompt,
           pageTitle: document.title,
-          history: actionHistory
+          history: actionHistory,
+          answerOnly: answerOnly
         }
       }, (resp) => {
         if (chrome.runtime.lastError) resolve({ ok: false, error: chrome.runtime.lastError.message });
