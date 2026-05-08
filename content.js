@@ -387,8 +387,13 @@
         addToLog("Invalid response from AI", "error");
         return;
       }
+
+      if (plan.answer) {
+        addToLog(`AI: ${plan.answer}`, "info");
+      }
+
       if (plan.action === "done") {
-        addToLog("Goal reached! Deactivating Pilot.", "success");
+        addToLog(plan.answer ? "Goal reached." : "Goal reached! Deactivating Pilot.", "success");
         stopScanning();
         return;
       }
