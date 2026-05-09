@@ -88,6 +88,7 @@ async function askGroqForAction(payload) {
       4. If the goal is reached or no more actions are needed, return action: "done".
       5. Be precise with "targetId" from the provided INTERACTABLE OPTIONS.
       6. If you've tried an action and it didn't seem to work (check history), try a different approach or element.
+      7. If you have an answer to the user's question or want to provide feedback, include it in the "answer" field.
 
       ACTION TYPES:
       - "click": For buttons, links, or radio buttons.
@@ -110,14 +111,15 @@ async function askGroqForAction(payload) {
         "direction": "down" | "up",
         "key": "...",
         "confidence": 0.0 to 1.0,
-        "reason": "Explain why this action moves towards the goal"
+        "reason": "Explain why this action moves towards the goal",
+        "answer": "Any direct communication or answer for the user."
       }
     `;
   }
 
   const userContent = `
     PAGE TITLE: ${pageTitle}
-    TASK CONTEXT: ${questionText}
+    ${userPrompt ? `USER PROMPT: ${userPrompt}` : `TASK CONTEXT: ${questionText}`}
 
     INTERACTABLE OPTIONS:
     ${choices.length > 0 ? choices.map(c => `- ${c.choiceId}: ${c.text}`).join("\n") : "None visible."}
