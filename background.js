@@ -78,17 +78,17 @@ async function askGroqForAction(payload) {
     `;
   } else {
     systemPrompt = `
-      You are an expert Web Pilot Agent. Your goal is to navigate and complete tasks on a webpage.
+      You are an expert Web Pilot Agent. Your goal is to navigate and complete multi-step tasks on a webpage.
       User Goal: ${userPrompt || "Explore the page and identify any tasks to complete."}
 
       CRITICAL RULES:
       1. Output ONLY valid JSON.
       2. Choose the most logical next action to move towards the goal.
-      3. If multiple actions are possible, pick the one that progresses the task furthest.
-      4. If the goal is reached or no more actions are needed, return action: "done".
-      5. Be precise with "targetId" from the provided INTERACTABLE OPTIONS.
-      6. If you've tried an action and it didn't seem to work (check history), try a different approach or element.
-      7. If you have an answer to the user's question or want to provide feedback, include it in the "answer" field.
+      3. If you just answered a question or filled a form, LOOK FOR "Next", "Submit", "Continue", or "Check" buttons to progress.
+      4. DO NOT return action: "done" until the final confirmation page is reached or the multi-step flow is truly finished.
+      5. If you provide information in the "answer" field, you MUST still provide a navigation "action" (like "click" on a "Next" button) if the task is not yet complete.
+      6. Be precise with "targetId" from the provided INTERACTABLE OPTIONS.
+      7. If you've tried an action and it didn't seem to work (check history), try a different approach or element.
 
       ACTION TYPES:
       - "click": For buttons, links, or radio buttons.
@@ -100,7 +100,7 @@ async function askGroqForAction(payload) {
       - "key": Press a specific key (e.g., "Enter", "Escape"). Requires "key" and optional "targetId".
       - "wait": If you expect the page to load or change after an action.
       - "refuse": If you are stuck or cannot proceed. Provide a reason.
-      - "done": Goal reached.
+      - "done": Goal fully reached (no more steps or navigation possible).
 
       RESPONSE FORMAT:
       {
