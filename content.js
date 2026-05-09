@@ -410,8 +410,10 @@
 
       const success = await applyActionWithRetry(plan);
       if (success) {
+        const target = interactablesMap.get(plan.targetId);
+        const targetText = target ? (target.innerText || target.getAttribute("aria-label") || target.name || plan.targetId) : "page";
         addToLog(`${plan.action.toUpperCase()}: ${plan.reason || "Executed"}`, "success");
-        actionHistory.push(`${plan.action} on ${plan.targetId || "page"}: ${plan.reason}`);
+        actionHistory.push(`${plan.action} on "${targetText}": ${plan.reason}`);
         saveState();
       } else {
         addToLog(`Failed to execute ${plan.action}`, "error");
@@ -582,7 +584,13 @@
   function gatherInteractables() {
     interactablesMap.clear();
     const choices = [];
-    const elements = document.querySelectorAll("input, textarea, select, button, a, [role='button'], summary");
+    // Expanded selectors for better reach
+    const selectors = [
+      "input", "textarea", "select", "button", "a", "summary",
+      "[role='button']", "[role='link']", "[role='checkbox']", "[role='menuitem']", "[role='tab']",
+      "[onclick]", ".btn", ".button"
+    ];
+    const elements = document.querySelectorAll(selectors.join(", "));
 
     Array.from(elements).forEach((el) => {
       if (!isInteractable(el)) return;
@@ -595,17 +603,24 @@
       interactablesMap.set(id, el);
 
       let text = "";
+      const ariaLabel = el.getAttribute("aria-label");
+      const title = el.getAttribute("title");
+      const placeholder = el.getAttribute("placeholder");
+
       if (el.tagName === "INPUT" || el.tagName === "TEXTAREA") {
         const label = document.querySelector(`label[for="${el.id}"]`) || el.closest("label");
-        text = `[${el.type || 'text'}] ${label?.innerText || el.placeholder || el.name || 'Input'}`;
+        text = `[${el.type || 'text'}] ${ariaLabel || label?.innerText || placeholder || el.name || 'Input'}`;
       } else if (el.tagName === "SELECT") {
         const label = document.querySelector(`label[for="${el.id}"]`) || el.closest("label");
-        text = `[select] ${label?.innerText || el.name || 'Dropdown'}`;
+        text = `[select] ${ariaLabel || label?.innerText || el.name || 'Dropdown'}`;
       } else {
-        text = `[${el.tagName.toLowerCase()}] ${el.innerText || el.value || el.title || 'Clickable'}`;
+        // For buttons/links, try innerText first, then aria-label, then title
+        text = `[${el.tagName.toLowerCase()}] ${el.innerText?.trim() || ariaLabel || title || placeholder || 'Interactive'}`;
       }
 
-      choices.push({ choiceId: id, text: text.trim().slice(0, 200) });
+      // Sanitize text and remove excessive whitespace
+      text = text.replace(/\s+/g, ' ').trim();
+      choices.push({ choiceId: id, text: text.slice(0, 200) });
     });
 
     return { 
