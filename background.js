@@ -42,8 +42,16 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 });
 
 async function askGroqForAction(payload) {
-  const { apiKey, selectedModel } = await chrome.storage.sync.get(["apiKey", "selectedModel"]);
-  if (!apiKey) throw new Error("API Key missing. Set it in options.");
+  let { apiKey1, apiKey2, apiKey3, apiKey, selectedModel, currentApiKeyIndex } = await chrome.storage.sync.get([
+    "apiKey1", "apiKey2", "apiKey3", "apiKey", "selectedModel", "currentApiKeyIndex"
+  ]);
+
+  const keys = [apiKey1, apiKey2, apiKey3].filter(k => !!k);
+  if (keys.length === 0 && apiKey) keys.push(apiKey);
+  if (keys.length === 0) throw new Error("API Key missing. Set it in options.");
+
+  if (currentApiKeyIndex === undefined) currentApiKeyIndex = 0;
+  if (currentApiKeyIndex >= keys.length) currentApiKeyIndex = 0;
 
   const model = selectedModel || DEFAULT_MODEL;
 
@@ -78,17 +86,17 @@ async function askGroqForAction(payload) {
     `;
   } else {
     systemPrompt = `
-      You are an expert Web Pilot Agent. Your goal is to navigate and complete tasks on a webpage.
+      You are an expert Web Pilot Agent. Your goal is to navigate and complete multi-step tasks on a webpage.
       User Goal: ${userPrompt || "Explore the page and identify any tasks to complete."}
 
       CRITICAL RULES:
       1. Output ONLY valid JSON.
       2. Choose the most logical next action to move towards the goal.
-      3. If multiple actions are possible, pick the one that progresses the task furthest.
-      4. If the goal is reached or no more actions are needed, return action: "done".
-      5. Be precise with "targetId" from the provided INTERACTABLE OPTIONS.
-      6. If you've tried an action and it didn't seem to work (check history), try a different approach or element.
-      7. If you have an answer to the user's question or want to provide feedback, include it in the "answer" field.
+      3. If you just answered a question or filled a form, LOOK FOR "Next", "Submit", "Continue", or "Check" buttons to progress.
+      4. DO NOT return action: "done" until the final confirmation page is reached or the multi-step flow is truly finished.
+      5. If you provide information in the "answer" field, you MUST still provide a navigation "action" (like "click" on a "Next" button) if the task is not yet complete.
+      6. Be precise with "targetId" from the provided INTERACTABLE OPTIONS.
+      7. If you've tried an action and it didn't seem to work (check history), try a different approach or element.
 
       ACTION TYPES:
       - "click": For buttons, links, or radio buttons.
@@ -100,7 +108,7 @@ async function askGroqForAction(payload) {
       - "key": Press a specific key (e.g., "Enter", "Escape"). Requires "key" and optional "targetId".
       - "wait": If you expect the page to load or change after an action.
       - "refuse": If you are stuck or cannot proceed. Provide a reason.
-      - "done": Goal reached.
+      - "done": Goal fully reached (no more steps or navigation possible).
 
       RESPONSE FORMAT:
       {
@@ -131,12 +139,19 @@ async function askGroqForAction(payload) {
     ${visibleText.slice(0, 6000)}
   `;
 
-  const resp = await fetch(GROQ_ENDPOINT, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`
-    },
+  let lastError = null;
+  // Try available keys starting from current index
+  for (let i = 0; i < keys.length; i++) {
+    const attemptIndex = (currentApiKeyIndex + i) % keys.length;
+    const currentKey = keys[attemptIndex];
+
+    try {
+      const resp = await fetch(GROQ_ENDPOINT, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${currentKey}`
+        },
     body: JSON.stringify({
       model: model,
       temperature: 0.1,
@@ -148,16 +163,36 @@ async function askGroqForAction(payload) {
     })
   });
 
-  if (!resp.ok) {
-    const errorData = await resp.json().catch(() => ({}));
-    throw new Error(`Groq error: ${resp.status} - ${errorData.error?.message || "Unknown error"}`);
+      if (!resp.ok) {
+        const errorData = await resp.json().catch(() => ({}));
+        const msg = errorData.error?.message || "Unknown error";
+        // If rate limit or other temporary error, try next key
+        if (resp.status === 429 || resp.status === 401 || resp.status === 402) {
+          console.warn(`Key ${attemptIndex + 1} failed (${resp.status}): ${msg}. Trying next...`);
+          lastError = new Error(`Groq error: ${resp.status} - ${msg}`);
+          continue;
+        }
+        throw new Error(`Groq error: ${resp.status} - ${msg}`);
+      }
+
+      const data = await resp.json();
+      try {
+        const result = JSON.parse(data.choices[0].message.content);
+        // Success! Save this index as the current one
+        if (attemptIndex !== currentApiKeyIndex) {
+          await chrome.storage.sync.set({ currentApiKeyIndex: attemptIndex });
+        }
+        return result;
+      } catch (e) {
+        console.error("Failed to parse AI response:", data.choices[0].message.content);
+        throw new Error("Invalid AI response format.");
+      }
+    } catch (err) {
+      lastError = err;
+      if (err.message.includes("fetch")) continue; // Network error, try next key
+      throw err;
+    }
   }
 
-  const data = await resp.json();
-  try {
-    return JSON.parse(data.choices[0].message.content);
-  } catch (e) {
-    console.error("Failed to parse AI response:", data.choices[0].message.content);
-    throw new Error("Invalid AI response format.");
-  }
+  throw lastError || new Error("All API keys failed.");
 }
