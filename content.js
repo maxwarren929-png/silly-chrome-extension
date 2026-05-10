@@ -579,17 +579,13 @@
     }
 
     try {
-      const normalized = normalizeMath(expression);
       // Use a slightly safer way than eval for basic math
-      const sanitized = normalized.replace(/[^-0-9+*/().]/g, '');
-      const final = sanitized.replace(/^[+*/]+/, '').replace(/[+*/-]+$/, '');
-      const result = Function('"use strict";return (' + final + ')')();
+      const sanitized = expression.replace(/[^-0-9 +*/().]/g, '');
+      const result = Function('"use strict";return (' + sanitized + ')')();
       responseEl.textContent = `Result: ${result}`;
-      addToLog(`Calculated: ${final} = ${result}`);
+      addToLog(`Calculated: ${expression} = ${result}`);
     } catch (e) {
-      console.error("Calc error:", e);
       responseEl.textContent = "Error: Invalid expression";
-      addToLog(`Calc Error: ${expression}`, "error");
     }
     responseEl.style.display = "block";
   }
