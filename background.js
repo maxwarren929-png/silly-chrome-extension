@@ -42,8 +42,16 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 });
 
 async function askGroqForAction(payload) {
-  const { apiKey, selectedModel } = await chrome.storage.sync.get(["apiKey", "selectedModel"]);
-  if (!apiKey) throw new Error("API Key missing. Set it in options.");
+  let { apiKey1, apiKey2, apiKey3, apiKey, selectedModel, currentApiKeyIndex } = await chrome.storage.sync.get([
+    "apiKey1", "apiKey2", "apiKey3", "apiKey", "selectedModel", "currentApiKeyIndex"
+  ]);
+
+  const keys = [apiKey1, apiKey2, apiKey3].filter(k => !!k);
+  if (keys.length === 0 && apiKey) keys.push(apiKey);
+  if (keys.length === 0) throw new Error("API Key missing. Set it in options.");
+
+  if (currentApiKeyIndex === undefined) currentApiKeyIndex = 0;
+  if (currentApiKeyIndex >= keys.length) currentApiKeyIndex = 0;
 
   const model = selectedModel || DEFAULT_MODEL;
 
@@ -131,12 +139,19 @@ async function askGroqForAction(payload) {
     ${visibleText.slice(0, 6000)}
   `;
 
-  const resp = await fetch(GROQ_ENDPOINT, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`
-    },
+  let lastError = null;
+  // Try available keys starting from current index
+  for (let i = 0; i < keys.length; i++) {
+    const attemptIndex = (currentApiKeyIndex + i) % keys.length;
+    const currentKey = keys[attemptIndex];
+
+    try {
+      const resp = await fetch(GROQ_ENDPOINT, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${currentKey}`
+        },
     body: JSON.stringify({
       model: model,
       temperature: 0.1,
@@ -148,16 +163,36 @@ async function askGroqForAction(payload) {
     })
   });
 
-  if (!resp.ok) {
-    const errorData = await resp.json().catch(() => ({}));
-    throw new Error(`Groq error: ${resp.status} - ${errorData.error?.message || "Unknown error"}`);
+      if (!resp.ok) {
+        const errorData = await resp.json().catch(() => ({}));
+        const msg = errorData.error?.message || "Unknown error";
+        // If rate limit or other temporary error, try next key
+        if (resp.status === 429 || resp.status === 401 || resp.status === 402) {
+          console.warn(`Key ${attemptIndex + 1} failed (${resp.status}): ${msg}. Trying next...`);
+          lastError = new Error(`Groq error: ${resp.status} - ${msg}`);
+          continue;
+        }
+        throw new Error(`Groq error: ${resp.status} - ${msg}`);
+      }
+
+      const data = await resp.json();
+      try {
+        const result = JSON.parse(data.choices[0].message.content);
+        // Success! Save this index as the current one
+        if (attemptIndex !== currentApiKeyIndex) {
+          await chrome.storage.sync.set({ currentApiKeyIndex: attemptIndex });
+        }
+        return result;
+      } catch (e) {
+        console.error("Failed to parse AI response:", data.choices[0].message.content);
+        throw new Error("Invalid AI response format.");
+      }
+    } catch (err) {
+      lastError = err;
+      if (err.message.includes("fetch")) continue; // Network error, try next key
+      throw err;
+    }
   }
 
-  const data = await resp.json();
-  try {
-    return JSON.parse(data.choices[0].message.content);
-  } catch (e) {
-    console.error("Failed to parse AI response:", data.choices[0].message.content);
-    throw new Error("Invalid AI response format.");
-  }
+  throw lastError || new Error("All API keys failed.");
 }

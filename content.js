@@ -82,6 +82,7 @@
           <div class="qa-title-row">
             <div class="qa-title">Pilot Pro</div>
             <div id="qa-badge" class="qa-badge">Idle</div>
+            <div id="qa-api-indicator" class="qa-api-indicator" title="Current API Key">Key 1</div>
           </div>
           <button class="qa-close">×</button>
         </div>
@@ -107,6 +108,27 @@
       actionHistory = [];
       saveState();
     });
+
+    root.querySelector("#qa-api-indicator").addEventListener("click", async () => {
+      const { apiKey1, apiKey2, apiKey3, currentApiKeyIndex = 0 } = await chrome.storage.sync.get(["apiKey1", "apiKey2", "apiKey3", "currentApiKeyIndex"]);
+      const keys = [apiKey1, apiKey2, apiKey3].filter(k => !!k);
+      if (keys.length <= 1) return;
+      const nextIndex = (currentApiKeyIndex + 1) % keys.length;
+      await chrome.storage.sync.set({ currentApiKeyIndex: nextIndex });
+      updateApiIndicator(nextIndex);
+      addToLog(`Switched to API Key ${nextIndex + 1}`);
+    });
+
+    // Initial API indicator update
+    chrome.storage.sync.get(["currentApiKeyIndex"], (res) => {
+      updateApiIndicator(res.currentApiKeyIndex || 0);
+    });
+  }
+
+  function updateApiIndicator(index) {
+    if (!root) return;
+    const indicator = root.querySelector("#qa-api-indicator");
+    if (indicator) indicator.textContent = `Key ${index + 1}`;
   }
 
   function makeDraggable(el) {
