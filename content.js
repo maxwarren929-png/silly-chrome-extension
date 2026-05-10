@@ -181,6 +181,10 @@
           <span class="qa-mode-name">Pilot</span>
           <span class="qa-mode-desc">Full autonomous agent.</span>
         </button>
+        <button class="qa-mode-btn" data-mode="calc">
+          <span class="qa-mode-name">Calculator</span>
+          <span class="qa-mode-desc">Solve math on page.</span>
+        </button>
       </div>
     `;
     content.querySelectorAll(".qa-mode-btn").forEach(btn => {
@@ -189,6 +193,7 @@
         if (mode === "manual") showManualUI();
         else if (mode === "auto") showAutoUI();
         else if (mode === "pilot") showPilotUI();
+        else if (mode === "calc") showCalculatorUI();
       });
     });
     setBadge("Idle", "idle");
@@ -287,6 +292,43 @@
     saveState();
   }
 
+  function showCalculatorUI() {
+    currentMode = "calc";
+    const content = root.querySelector("#qa-content");
+    content.innerHTML = `
+      <div class="qa-calc-ui">
+        <button class="qa-back-btn">← Modes</button>
+        <textarea class="qa-textarea" placeholder="Enter math expression or leave empty to scan page..."></textarea>
+        <div class="qa-settings-row">
+          <label>Interval: <span id="interval-val">${scanInterval/1000}</span>s</label>
+          <input type="range" id="scan-interval" min="1000" max="10000" step="500" value="${scanInterval}">
+        </div>
+        <div class="qa-controls">
+          <button class="qa-primary-btn" id="qa-calc-btn">Calculate Once</button>
+          <button class="qa-primary-btn" id="qa-start-calc">Start Auto-Calc</button>
+          <button class="qa-secondary-btn" id="qa-pause-btn" style="display:none">Pause</button>
+          <button class="qa-danger-btn" id="qa-stop-btn" style="display:none">Stop</button>
+        </div>
+        <div id="qa-response" class="qa-response" style="display:none"></div>
+      </div>
+    `;
+    content.querySelector(".qa-back-btn").addEventListener("click", showModePicker);
+    content.querySelector("#qa-calc-btn").addEventListener("click", onCalculatorSolve);
+    content.querySelector("#qa-start-calc").addEventListener("click", () => startScanning("calc"));
+    content.querySelector("#qa-stop-btn").addEventListener("click", stopScanning);
+    content.querySelector("#qa-pause-btn").addEventListener("click", togglePause);
+
+    const slider = content.querySelector("#scan-interval");
+    slider.addEventListener("input", (e) => {
+      scanInterval = parseInt(e.target.value);
+      content.querySelector("#interval-val").textContent = (scanInterval/1000).toFixed(1);
+      saveState();
+    });
+
+    if (isScanning) updateUIForScanning();
+    saveState();
+  }
+
   function startScanning(mode) {
     const textarea = root.querySelector(".qa-textarea");
     autoPrompt = textarea ? textarea.value.trim() : "";
@@ -302,12 +344,14 @@
 
   function updateUIForScanning() {
     if (!root) return;
-    const startBtn = root.querySelector("#qa-start-auto") || root.querySelector("#qa-start-pilot");
+    const startBtn = root.querySelector("#qa-start-auto") || root.querySelector("#qa-start-pilot") || root.querySelector("#qa-start-calc");
+    const onceBtn = root.querySelector("#qa-calc-btn");
     const stopBtn = root.querySelector("#qa-stop-btn");
     const pauseBtn = root.querySelector("#qa-pause-btn");
     const textarea = root.querySelector(".qa-textarea");
 
     if (startBtn) startBtn.style.display = "none";
+    if (onceBtn) onceBtn.style.display = "none";
     if (stopBtn) stopBtn.style.display = "block";
     if (pauseBtn) {
       pauseBtn.style.display = "block";
@@ -331,12 +375,14 @@
     isScanning = false;
     isPaused = false;
 
-    const startBtn = root.querySelector("#qa-start-auto") || root.querySelector("#qa-start-pilot");
+    const startBtn = root.querySelector("#qa-start-auto") || root.querySelector("#qa-start-pilot") || root.querySelector("#qa-start-calc");
+    const onceBtn = root.querySelector("#qa-calc-btn");
     const stopBtn = root.querySelector("#qa-stop-btn");
     const pauseBtn = root.querySelector("#qa-pause-btn");
     const textarea = root.querySelector(".qa-textarea");
 
     if (startBtn) startBtn.style.display = "block";
+    if (onceBtn) onceBtn.style.display = "block";
     if (stopBtn) stopBtn.style.display = "none";
     if (pauseBtn) pauseBtn.style.display = "none";
     if (textarea) textarea.disabled = false;
@@ -359,11 +405,13 @@
 
     try {
       const task = gatherInteractables();
-      if (task.choices.length > 0 || currentMode === "pilot") {
+      if (task.choices.length > 0 || currentMode === "pilot" || currentMode === "calc") {
         if (currentMode === "pilot") {
           await executePilotStep(task);
         } else if (currentMode === "auto") {
           await offerAutoStep(task);
+        } else if (currentMode === "calc") {
+          await autoCalculateStep();
         }
       }
     } catch (e) {
@@ -482,6 +530,64 @@
       responseEl.textContent = "Error: " + result.error;
     }
     responseEl.style.display = "block";
+  }
+
+  async function onCalculatorSolve() {
+    const btn = root.querySelector("#qa-calc-btn");
+    const responseEl = root.querySelector("#qa-response");
+    const textarea = root.querySelector(".qa-textarea");
+    if (!btn || !responseEl || !textarea) return;
+
+    let expression = textarea.value.trim();
+
+    // If empty, try to find math in the visible text
+    if (!expression) {
+      const visibleText = extractVisibleText();
+      const mathMatch = visibleText.match(/(\d+[\s\+\-\*\/\(\)]+\d+)/);
+      if (mathMatch) {
+        expression = mathMatch[0];
+        textarea.value = expression;
+      }
+    }
+
+    if (!expression) {
+      responseEl.textContent = "No expression found.";
+      responseEl.style.display = "block";
+      return;
+    }
+
+    try {
+      // Use a slightly safer way than eval for basic math
+      const sanitized = expression.replace(/[^-0-9 +*/().]/g, '');
+      const result = Function('"use strict";return (' + sanitized + ')')();
+      responseEl.textContent = `Result: ${result}`;
+      addToLog(`Calculated: ${expression} = ${result}`);
+    } catch (e) {
+      responseEl.textContent = "Error: Invalid expression";
+    }
+    responseEl.style.display = "block";
+  }
+
+  async function autoCalculateStep() {
+    const visibleText = extractVisibleText();
+    // Look for things like "2 + 2 =" or "What is 15 * 3?"
+    const mathMatch = visibleText.match(/(\d+[\s\+\-\*\/\x\÷]+[\s\+\-\*\/\x\÷\d]*\d+)/);
+    if (mathMatch) {
+      let expression = mathMatch[0].replace(/x/g, '*').replace(/÷/g, '/');
+      try {
+        const sanitized = expression.replace(/[^-0-9 +*/().]/g, '');
+        const result = Function('"use strict";return (' + sanitized + ')')();
+
+        const responseEl = root.querySelector("#qa-response");
+        if (responseEl) {
+          responseEl.textContent = `Auto-Calc: ${expression} = ${result}`;
+          responseEl.style.display = "block";
+        }
+        addToLog(`Auto-Calculated: ${expression} = ${result}`);
+      } catch (e) {
+        // Ignore errors in auto-mode
+      }
+    }
   }
 
   function applyAction(plan) {
