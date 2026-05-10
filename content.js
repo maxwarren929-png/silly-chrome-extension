@@ -82,6 +82,7 @@
           <div class="qa-title-row">
             <div class="qa-title">Pilot Pro</div>
             <div id="qa-badge" class="qa-badge">Idle</div>
+            <div id="qa-api-indicator" class="qa-api-indicator" title="Current API Key">Key 1</div>
           </div>
           <button class="qa-close">×</button>
         </div>
@@ -107,6 +108,27 @@
       actionHistory = [];
       saveState();
     });
+
+    root.querySelector("#qa-api-indicator").addEventListener("click", async () => {
+      const { apiKey1, apiKey2, apiKey3, currentApiKeyIndex = 0 } = await chrome.storage.sync.get(["apiKey1", "apiKey2", "apiKey3", "currentApiKeyIndex"]);
+      const keys = [apiKey1, apiKey2, apiKey3].filter(k => !!k);
+      if (keys.length <= 1) return;
+      const nextIndex = (currentApiKeyIndex + 1) % keys.length;
+      await chrome.storage.sync.set({ currentApiKeyIndex: nextIndex });
+      updateApiIndicator(nextIndex);
+      addToLog(`Switched to API Key ${nextIndex + 1}`);
+    });
+
+    // Initial API indicator update
+    chrome.storage.sync.get(["currentApiKeyIndex"], (res) => {
+      updateApiIndicator(res.currentApiKeyIndex || 0);
+    });
+  }
+
+  function updateApiIndicator(index) {
+    if (!root) return;
+    const indicator = root.querySelector("#qa-api-indicator");
+    if (indicator) indicator.textContent = `Key ${index + 1}`;
   }
 
   function makeDraggable(el) {
@@ -181,6 +203,10 @@
           <span class="qa-mode-name">Pilot</span>
           <span class="qa-mode-desc">Full autonomous agent.</span>
         </button>
+        <button class="qa-mode-btn" data-mode="calc">
+          <span class="qa-mode-name">Calculator</span>
+          <span class="qa-mode-desc">Solve math on page.</span>
+        </button>
       </div>
     `;
     content.querySelectorAll(".qa-mode-btn").forEach(btn => {
@@ -189,6 +215,7 @@
         if (mode === "manual") showManualUI();
         else if (mode === "auto") showAutoUI();
         else if (mode === "pilot") showPilotUI();
+        else if (mode === "calc") showCalculatorUI();
       });
     });
     setBadge("Idle", "idle");
@@ -287,6 +314,43 @@
     saveState();
   }
 
+  function showCalculatorUI() {
+    currentMode = "calc";
+    const content = root.querySelector("#qa-content");
+    content.innerHTML = `
+      <div class="qa-calc-ui">
+        <button class="qa-back-btn">← Modes</button>
+        <textarea class="qa-textarea" placeholder="Enter math expression or leave empty to scan page..."></textarea>
+        <div class="qa-settings-row">
+          <label>Interval: <span id="interval-val">${scanInterval/1000}</span>s</label>
+          <input type="range" id="scan-interval" min="1000" max="10000" step="500" value="${scanInterval}">
+        </div>
+        <div class="qa-controls">
+          <button class="qa-primary-btn" id="qa-calc-btn">Calculate Once</button>
+          <button class="qa-primary-btn" id="qa-start-calc">Start Auto-Calc</button>
+          <button class="qa-secondary-btn" id="qa-pause-btn" style="display:none">Pause</button>
+          <button class="qa-danger-btn" id="qa-stop-btn" style="display:none">Stop</button>
+        </div>
+        <div id="qa-response" class="qa-response" style="display:none"></div>
+      </div>
+    `;
+    content.querySelector(".qa-back-btn").addEventListener("click", showModePicker);
+    content.querySelector("#qa-calc-btn").addEventListener("click", onCalculatorSolve);
+    content.querySelector("#qa-start-calc").addEventListener("click", () => startScanning("calc"));
+    content.querySelector("#qa-stop-btn").addEventListener("click", stopScanning);
+    content.querySelector("#qa-pause-btn").addEventListener("click", togglePause);
+
+    const slider = content.querySelector("#scan-interval");
+    slider.addEventListener("input", (e) => {
+      scanInterval = parseInt(e.target.value);
+      content.querySelector("#interval-val").textContent = (scanInterval/1000).toFixed(1);
+      saveState();
+    });
+
+    if (isScanning) updateUIForScanning();
+    saveState();
+  }
+
   function startScanning(mode) {
     const textarea = root.querySelector(".qa-textarea");
     autoPrompt = textarea ? textarea.value.trim() : "";
@@ -302,12 +366,14 @@
 
   function updateUIForScanning() {
     if (!root) return;
-    const startBtn = root.querySelector("#qa-start-auto") || root.querySelector("#qa-start-pilot");
+    const startBtn = root.querySelector("#qa-start-auto") || root.querySelector("#qa-start-pilot") || root.querySelector("#qa-start-calc");
+    const onceBtn = root.querySelector("#qa-calc-btn");
     const stopBtn = root.querySelector("#qa-stop-btn");
     const pauseBtn = root.querySelector("#qa-pause-btn");
     const textarea = root.querySelector(".qa-textarea");
 
     if (startBtn) startBtn.style.display = "none";
+    if (onceBtn) onceBtn.style.display = "none";
     if (stopBtn) stopBtn.style.display = "block";
     if (pauseBtn) {
       pauseBtn.style.display = "block";
@@ -331,12 +397,14 @@
     isScanning = false;
     isPaused = false;
 
-    const startBtn = root.querySelector("#qa-start-auto") || root.querySelector("#qa-start-pilot");
+    const startBtn = root.querySelector("#qa-start-auto") || root.querySelector("#qa-start-pilot") || root.querySelector("#qa-start-calc");
+    const onceBtn = root.querySelector("#qa-calc-btn");
     const stopBtn = root.querySelector("#qa-stop-btn");
     const pauseBtn = root.querySelector("#qa-pause-btn");
     const textarea = root.querySelector(".qa-textarea");
 
     if (startBtn) startBtn.style.display = "block";
+    if (onceBtn) onceBtn.style.display = "block";
     if (stopBtn) stopBtn.style.display = "none";
     if (pauseBtn) pauseBtn.style.display = "none";
     if (textarea) textarea.disabled = false;
@@ -359,11 +427,13 @@
 
     try {
       const task = gatherInteractables();
-      if (task.choices.length > 0 || currentMode === "pilot") {
+      if (task.choices.length > 0 || currentMode === "pilot" || currentMode === "calc") {
         if (currentMode === "pilot") {
           await executePilotStep(task);
         } else if (currentMode === "auto") {
           await offerAutoStep(task);
+        } else if (currentMode === "calc") {
+          await autoCalculateStep();
         }
       }
     } catch (e) {
@@ -410,8 +480,10 @@
 
       const success = await applyActionWithRetry(plan);
       if (success) {
+        const target = interactablesMap.get(plan.targetId);
+        const targetText = target ? (target.innerText || target.getAttribute("aria-label") || target.name || plan.targetId) : "page";
         addToLog(`${plan.action.toUpperCase()}: ${plan.reason || "Executed"}`, "success");
-        actionHistory.push(`${plan.action} on ${plan.targetId || "page"}: ${plan.reason}`);
+        actionHistory.push(`${plan.action} on "${targetText}": ${plan.reason}`);
         saveState();
       } else {
         addToLog(`Failed to execute ${plan.action}`, "error");
@@ -480,6 +552,101 @@
       responseEl.textContent = "Error: " + result.error;
     }
     responseEl.style.display = "block";
+  }
+
+  async function onCalculatorSolve() {
+    const btn = root.querySelector("#qa-calc-btn");
+    const responseEl = root.querySelector("#qa-response");
+    const textarea = root.querySelector(".qa-textarea");
+    if (!btn || !responseEl || !textarea) return;
+
+    let expression = textarea.value.trim();
+
+    // If empty, try to find math in the visible text
+    if (!expression) {
+      const visibleText = extractVisibleText();
+      const mathMatch = visibleText.match(/(\d+[\s\+\-\*\/\(\)]+\d+)/);
+      if (mathMatch) {
+        expression = mathMatch[0];
+        textarea.value = expression;
+      }
+    }
+
+    if (!expression) {
+      responseEl.textContent = "No expression found.";
+      responseEl.style.display = "block";
+      return;
+    }
+
+    try {
+      const normalized = normalizeMath(expression);
+      // Use a slightly safer way than eval for basic math
+      const sanitized = normalized.replace(/[^-0-9+*/().]/g, '');
+      const final = sanitized.replace(/^[+*/]+/, '').replace(/[+*/-]+$/, '');
+      const result = Function('"use strict";return (' + final + ')')();
+      responseEl.textContent = `Result: ${result}`;
+      addToLog(`Calculated: ${final} = ${result}`);
+    } catch (e) {
+      console.error("Calc error:", e);
+      responseEl.textContent = "Error: Invalid expression";
+      addToLog(`Calc Error: ${expression}`, "error");
+    }
+    responseEl.style.display = "block";
+  }
+
+  function normalizeMath(str) {
+    let s = str
+      .replace(/[−–—]/g, '-') // Various minus/dash signs
+      .replace(/[×]/g, '*')
+      .replace(/[÷]/g, '/')
+      .replace(/\s+/g, ''); // Remove all whitespace for easier processing
+
+    // Handle implicit multiplication between parentheses: (a)(b) -> (a)*(b)
+    s = s.replace(/\)\(/g, ')*(');
+
+    // Handle implicit multiplication with numbers: 2(3) -> 2*(3), (2)3 -> (2)*3
+    s = s.replace(/(\d)\(/g, '$1*(');
+    s = s.replace(/\)(\d)/g, ')*$1');
+
+    // Handle 'x' as multiplication only if it's between numbers or a number and a parenthesis
+    s = s.replace(/(\d)x(\d)/g, '$1*$2');
+    s = s.replace(/(\d)x\(/g, '$1*(');
+    s = s.replace(/\)x(\d)/g, ')*$1');
+    s = s.replace(/\)x\(/g, ')*(');
+
+    return s;
+  }
+
+  async function autoCalculateStep() {
+    const visibleText = extractVisibleText();
+    // Improved regex to find expressions that look like arithmetic (at least one operator)
+    const mathMatch = visibleText.match(/([\d\(\)][\d\s\+\-\*\/\x\÷\(\)\.]{1,}[\d\(\)])/);
+    if (mathMatch) {
+      let expression = mathMatch[0];
+      try {
+        const normalized = normalizeMath(expression);
+        // Strip everything except numbers, operators, dots, and parentheses
+        const sanitized = normalized.replace(/[^-0-9+*/().]/g, '');
+
+        // Final check: must have at least one operator to be an "expression" worth auto-solving
+        if (!sanitized || !/[+\-*/]/.test(sanitized) || !/\d/.test(sanitized)) return;
+
+        // Clean up leading/trailing operators that might have resulted from stripping variables
+        const final = sanitized.replace(/^[+*/]+/, '').replace(/[+*/-]+$/, '');
+        if (!final || !/[+\-*/]/.test(final)) return;
+
+        const result = Function('"use strict";return (' + final + ')')();
+
+        const responseEl = root.querySelector("#qa-response");
+        if (responseEl) {
+          responseEl.textContent = `Auto-Calc: ${expression} = ${result}`;
+          responseEl.style.display = "block";
+        }
+        addToLog(`Auto-Calculated: ${expression} = ${result}`);
+      } catch (e) {
+        // Ignore errors in auto-mode
+      }
+    }
   }
 
   function applyAction(plan) {
@@ -582,7 +749,13 @@
   function gatherInteractables() {
     interactablesMap.clear();
     const choices = [];
-    const elements = document.querySelectorAll("input, textarea, select, button, a, [role='button'], summary");
+    // Expanded selectors for better reach
+    const selectors = [
+      "input", "textarea", "select", "button", "a", "summary",
+      "[role='button']", "[role='link']", "[role='checkbox']", "[role='menuitem']", "[role='tab']",
+      "[onclick]", ".btn", ".button"
+    ];
+    const elements = document.querySelectorAll(selectors.join(", "));
 
     Array.from(elements).forEach((el) => {
       if (!isInteractable(el)) return;
@@ -595,17 +768,24 @@
       interactablesMap.set(id, el);
 
       let text = "";
+      const ariaLabel = el.getAttribute("aria-label");
+      const title = el.getAttribute("title");
+      const placeholder = el.getAttribute("placeholder");
+
       if (el.tagName === "INPUT" || el.tagName === "TEXTAREA") {
         const label = document.querySelector(`label[for="${el.id}"]`) || el.closest("label");
-        text = `[${el.type || 'text'}] ${label?.innerText || el.placeholder || el.name || 'Input'}`;
+        text = `[${el.type || 'text'}] ${ariaLabel || label?.innerText || placeholder || el.name || 'Input'}`;
       } else if (el.tagName === "SELECT") {
         const label = document.querySelector(`label[for="${el.id}"]`) || el.closest("label");
-        text = `[select] ${label?.innerText || el.name || 'Dropdown'}`;
+        text = `[select] ${ariaLabel || label?.innerText || el.name || 'Dropdown'}`;
       } else {
-        text = `[${el.tagName.toLowerCase()}] ${el.innerText || el.value || el.title || 'Clickable'}`;
+        // For buttons/links, try innerText first, then aria-label, then title
+        text = `[${el.tagName.toLowerCase()}] ${el.innerText?.trim() || ariaLabel || title || placeholder || 'Interactive'}`;
       }
 
-      choices.push({ choiceId: id, text: text.trim().slice(0, 200) });
+      // Sanitize text and remove excessive whitespace
+      text = text.replace(/\s+/g, ' ').trim();
+      choices.push({ choiceId: id, text: text.slice(0, 200) });
     });
 
     return { 
