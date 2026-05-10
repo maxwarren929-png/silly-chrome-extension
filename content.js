@@ -565,11 +565,8 @@
     // If empty, try to find math in the visible text
     if (!expression) {
       const visibleText = extractVisibleText();
-      const mathMatch = visibleText.match(/(\d+[\s\+\-\*\/\(\)]+\d+)/);
-      if (mathMatch) {
-        expression = mathMatch[0];
-        textarea.value = expression;
-      }
+      expression = findBestMathMatch(visibleText);
+      if (expression) textarea.value = expression;
     }
 
     if (!expression) {
@@ -578,16 +575,56 @@
       return;
     }
 
-    try {
-      // Use a slightly safer way than eval for basic math
-      const sanitized = expression.replace(/[^-0-9 +*/().]/g, '');
-      const result = Function('"use strict";return (' + sanitized + ')')();
-      responseEl.textContent = `Result: ${result}`;
-      addToLog(`Calculated: ${expression} = ${result}`);
-    } catch (e) {
-      responseEl.textContent = "Error: Invalid expression";
+    if (/[a-zA-Z]/.test(expression) && !/^x$/i.test(expression)) {
+      // If it looks like algebra, use Groq
+      responseEl.textContent = "Solving algebra...";
+      responseEl.style.display = "block";
+      const task = gatherInteractables();
+      const result = await askGroqForAction(task, `Please solve or expand this math expression: ${expression}`, true);
+      if (result.ok) {
+        responseEl.textContent = result.plan.answer || result.plan.reason;
+        addToLog(`Algebra solved: ${expression}`);
+      } else {
+        responseEl.textContent = "Error: " + result.error;
+      }
+    } else {
+      try {
+        const normalized = normalizeMath(expression);
+        const sanitized = normalized.replace(/[^-0-9+*/().]/g, '');
+        const result = Function('"use strict";return (' + sanitized + ')')();
+        responseEl.textContent = `Result: ${result}`;
+        addToLog(`Calculated: ${expression} = ${result}`);
+      } catch (e) {
+        responseEl.textContent = "Error: Invalid expression";
+      }
     }
     responseEl.style.display = "block";
+  }
+
+  function findBestMathMatch(text) {
+    const mathRegex = /([\d\(x][\d\s\+\-\*\/x÷\(\)\.\^−=]{1,}[\d\)x])/gi;
+    const matches = text.match(mathRegex) || [];
+
+    let bestMatch = null;
+    let maxScore = -1;
+
+    for (let match of matches) {
+      const trimmed = match.trim();
+      let score = trimmed.length;
+
+      if (/[+\-*/x÷^−=]/.test(trimmed)) score += 10;
+      if (/\(.*\)/s.test(trimmed)) score += 20;
+      if (/[x]/i.test(trimmed)) score += 15;
+
+      if (/^\d+\s*[\/\\]\s*\d+$/.test(trimmed)) score -= 50;
+      if (/^\d+$/.test(trimmed)) score -= 100;
+
+      if (score > maxScore) {
+        maxScore = score;
+        bestMatch = trimmed;
+      }
+    }
+    return bestMatch;
   }
 
   function normalizeMath(str) {
@@ -595,7 +632,7 @@
       .replace(/[−–—]/g, '-') // Various minus/dash signs
       .replace(/[×]/g, '*')
       .replace(/[÷]/g, '/')
-      .replace(/\s+/g, ''); // Remove all whitespace for easier processing
+      .replace(/\s+/g, ''); // Remove all whitespace
 
     // Handle implicit multiplication between parentheses: (a)(b) -> (a)*(b)
     s = s.replace(/\)\(/g, ')*(');
@@ -615,19 +652,26 @@
 
   async function autoCalculateStep() {
     const visibleText = extractVisibleText();
-    // Improved regex to find expressions that look like arithmetic (at least one operator)
-    const mathMatch = visibleText.match(/([\d\(\)][\d\s\+\-\*\/\x\÷\(\)\.]{1,}[\d\(\)])/);
-    if (mathMatch) {
-      let expression = mathMatch[0];
+    const expression = findBestMathMatch(visibleText);
+
+    if (expression) {
+      if (/[a-zA-Z]/.test(expression)) {
+        // For auto-calc, we only auto-solve arithmetic to avoid excessive API calls
+        // But we can at least show it in the response if it looks like the main goal
+        const responseEl = root.querySelector("#qa-response");
+        if (responseEl && !responseEl.textContent.includes("Result:")) {
+          responseEl.textContent = `Found: ${expression.replace(/\s+/g, ' ')}`;
+          responseEl.style.display = "block";
+        }
+        return;
+      }
+
       try {
         const normalized = normalizeMath(expression);
-        // Strip everything except numbers, operators, dots, and parentheses
         const sanitized = normalized.replace(/[^-0-9+*/().]/g, '');
 
-        // Final check: must have at least one operator to be an "expression" worth auto-solving
         if (!sanitized || !/[+\-*/]/.test(sanitized) || !/\d/.test(sanitized)) return;
 
-        // Clean up leading/trailing operators that might have resulted from stripping variables
         const final = sanitized.replace(/^[+*/]+/, '').replace(/[+*/-]+$/, '');
         if (!final || !/[+\-*/]/.test(final)) return;
 
@@ -635,10 +679,10 @@
 
         const responseEl = root.querySelector("#qa-response");
         if (responseEl) {
-          responseEl.textContent = `Auto-Calc: ${expression} = ${result}`;
+          responseEl.textContent = `Auto-Calc: ${result}`;
           responseEl.style.display = "block";
         }
-        addToLog(`Auto-Calculated: ${expression} = ${result}`);
+        addToLog(`Auto-Calculated: ${expression.replace(/\s+/g, ' ')} = ${result}`);
       } catch (e) {
         // Ignore errors in auto-mode
       }
