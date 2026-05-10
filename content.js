@@ -590,15 +590,48 @@
     responseEl.style.display = "block";
   }
 
+  function normalizeMath(str) {
+    let s = str
+      .replace(/[−–—]/g, '-') // Various minus/dash signs
+      .replace(/[×]/g, '*')
+      .replace(/[÷]/g, '/')
+      .replace(/\s+/g, ''); // Remove all whitespace for easier processing
+
+    // Handle implicit multiplication between parentheses: (a)(b) -> (a)*(b)
+    s = s.replace(/\)\(/g, ')*(');
+
+    // Handle implicit multiplication with numbers: 2(3) -> 2*(3), (2)3 -> (2)*3
+    s = s.replace(/(\d)\(/g, '$1*(');
+    s = s.replace(/\)(\d)/g, ')*$1');
+
+    // Handle 'x' as multiplication only if it's between numbers or a number and a parenthesis
+    s = s.replace(/(\d)x(\d)/g, '$1*$2');
+    s = s.replace(/(\d)x\(/g, '$1*(');
+    s = s.replace(/\)x(\d)/g, ')*$1');
+    s = s.replace(/\)x\(/g, ')*(');
+
+    return s;
+  }
+
   async function autoCalculateStep() {
     const visibleText = extractVisibleText();
-    // Look for things like "2 + 2 =" or "What is 15 * 3?"
-    const mathMatch = visibleText.match(/(\d+[\s\+\-\*\/\x\÷]+[\s\+\-\*\/\x\÷\d]*\d+)/);
+    // Improved regex to find expressions that look like arithmetic (at least one operator)
+    const mathMatch = visibleText.match(/([\d\(\)][\d\s\+\-\*\/\x\÷\(\)\.]{1,}[\d\(\)])/);
     if (mathMatch) {
-      let expression = mathMatch[0].replace(/x/g, '*').replace(/÷/g, '/');
+      let expression = mathMatch[0];
       try {
-        const sanitized = expression.replace(/[^-0-9 +*/().]/g, '');
-        const result = Function('"use strict";return (' + sanitized + ')')();
+        const normalized = normalizeMath(expression);
+        // Strip everything except numbers, operators, dots, and parentheses
+        const sanitized = normalized.replace(/[^-0-9+*/().]/g, '');
+
+        // Final check: must have at least one operator to be an "expression" worth auto-solving
+        if (!sanitized || !/[+\-*/]/.test(sanitized) || !/\d/.test(sanitized)) return;
+
+        // Clean up leading/trailing operators that might have resulted from stripping variables
+        const final = sanitized.replace(/^[+*/]+/, '').replace(/[+*/-]+$/, '');
+        if (!final || !/[+\-*/]/.test(final)) return;
+
+        const result = Function('"use strict";return (' + final + ')')();
 
         const responseEl = root.querySelector("#qa-response");
         if (responseEl) {
