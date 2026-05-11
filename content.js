@@ -495,11 +495,18 @@
 
   async function applyActionWithRetry(plan, retries = 2) {
     for (let i = 0; i <= retries; i++) {
-      const success = applyAction(plan);
-      if (success) return true;
+      try {
+        const success = await applyAction(plan);
+        if (success) return true;
+      } catch (e) {
+        console.error("Action error:", e);
+      }
+
       if (i < retries) {
         addToLog(`Retrying ${plan.action}... (${i+1}/${retries})`, "info");
-        await new Promise(r => setTimeout(r, 1000));
+        await new Promise(r => setTimeout(r, 1500));
+        // Re-gather to handle dynamic elements
+        gatherInteractables();
       }
     }
     return false;
@@ -602,7 +609,8 @@
   }
 
   function findBestMathMatch(text) {
-    const mathRegex = /([\d\(x][\d\s\+\-\*\/x÷\(\)\.\^−=]{1,}[\d\)x])/gi;
+    // Enhanced regex to avoid simple dates, fractions like 1/2 in text, etc.
+    const mathRegex = /((?:[\d\(x]|sqrt|log|sin|cos|tan)[\d\s\+\-\*\/\^x÷\(\)\.\^−=√πθ]{1,}[\d\)x])/gi;
     const matches = text.match(mathRegex) || [];
 
     let bestMatch = null;
@@ -610,14 +618,21 @@
 
     for (let match of matches) {
       const trimmed = match.trim();
+      if (trimmed.length < 3) continue;
+
       let score = trimmed.length;
 
-      if (/[+\-*/x÷^−=]/.test(trimmed)) score += 10;
+      // Bonus for operators
+      if (/[+\-\*\/x÷^−=√π]/.test(trimmed)) score += 15;
       if (/\(.*\)/s.test(trimmed)) score += 20;
-      if (/[x]/i.test(trimmed)) score += 15;
+      if (/[xθ]/i.test(trimmed)) score += 15;
+      if (/=/.test(trimmed)) score += 25; // Likely an equation
 
-      if (/^\d+\s*[\/\\]\s*\d+$/.test(trimmed)) score -= 50;
-      if (/^\d+$/.test(trimmed)) score -= 100;
+      // Penalize common non-math patterns
+      if (/^\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4}$/.test(trimmed)) score -= 100; // Dates
+      if (/^\d+\/\d+$/.test(trimmed) && trimmed.length < 6) score -= 40; // Simple progress like 1/10
+      if (/^\d+$/.test(trimmed)) score -= 100; // Just a number
+      if (trimmed.includes(":") && !trimmed.includes("=")) score -= 50; // Likely time or ratio
 
       if (score > maxScore) {
         maxScore = score;
@@ -629,23 +644,24 @@
 
   function normalizeMath(str) {
     let s = str
-      .replace(/[−–—]/g, '-') // Various minus/dash signs
-      .replace(/[×]/g, '*')
+      .replace(/[−–—]/g, '-')
+      .replace(/[×⋅]/g, '*')
       .replace(/[÷]/g, '/')
-      .replace(/\s+/g, ''); // Remove all whitespace
+      .replace(/π/g, 'Math.PI')
+      .replace(/\^/g, '**') // JS exponentiation
+      .replace(/\s+/g, '');
 
-    // Handle implicit multiplication between parentheses: (a)(b) -> (a)*(b)
+    // Handle square root: √16 -> Math.sqrt(16), √(2+2) -> Math.sqrt(2+2)
+    s = s.replace(/√(\d+(?:\.\d+)?|\([^)]+\))/g, 'Math.sqrt($1)');
+    // Fallback for bare symbol
+    s = s.replace(/√/g, 'Math.sqrt');
+
+    // Handle implicit multiplication
     s = s.replace(/\)\(/g, ')*(');
-
-    // Handle implicit multiplication with numbers: 2(3) -> 2*(3), (2)3 -> (2)*3
     s = s.replace(/(\d)\(/g, '$1*(');
     s = s.replace(/\)(\d)/g, ')*$1');
-
-    // Handle 'x' as multiplication only if it's between numbers or a number and a parenthesis
-    s = s.replace(/(\d)x(\d)/g, '$1*$2');
-    s = s.replace(/(\d)x\(/g, '$1*(');
-    s = s.replace(/\)x(\d)/g, ')*$1');
-    s = s.replace(/\)x\(/g, ')*(');
+    s = s.replace(/(\d)x/gi, '$1*x');
+    s = s.replace(/x(\d)/gi, 'x*$1');
 
     return s;
   }
@@ -707,8 +723,11 @@
         case "click":
         case "check":
           target.focus();
-          target.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, view: window, cancelable: true }));
-          target.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, view: window, cancelable: true }));
+          // Simulate a more realistic click sequence
+          const opts = { bubbles: true, view: window, cancelable: true };
+          target.dispatchEvent(new MouseEvent("mouseover", opts));
+          target.dispatchEvent(new MouseEvent("mousedown", opts));
+          target.dispatchEvent(new MouseEvent("mouseup", opts));
           target.click();
           return true;
         case "type":
@@ -789,16 +808,16 @@
   function gatherInteractables() {
     interactablesMap.clear();
     const choices = [];
-    // Expanded selectors for better reach
     const selectors = [
-      "input", "textarea", "select", "button", "a", "summary",
+      "input:not([type='hidden'])", "textarea", "select", "button", "a", "summary",
       "[role='button']", "[role='link']", "[role='checkbox']", "[role='menuitem']", "[role='tab']",
       "[onclick]", ".btn", ".button"
     ];
     const elements = document.querySelectorAll(selectors.join(", "));
 
     Array.from(elements).forEach((el) => {
-      if (!isInteractable(el)) return;
+      const { visible, reason } = isInteractable(el);
+      if (!visible) return;
 
       let id = elementIdsMap.get(el);
       if (!id) {
@@ -811,41 +830,100 @@
       const ariaLabel = el.getAttribute("aria-label");
       const title = el.getAttribute("title");
       const placeholder = el.getAttribute("placeholder");
+      const innerText = el.innerText?.trim();
 
       if (el.tagName === "INPUT" || el.tagName === "TEXTAREA") {
         const label = document.querySelector(`label[for="${el.id}"]`) || el.closest("label");
-        text = `[${el.type || 'text'}] ${ariaLabel || label?.innerText || placeholder || el.name || 'Input'}`;
+        text = `[${el.type || 'text'}] ${ariaLabel || label?.innerText?.trim() || placeholder || el.name || 'Input'}`;
       } else if (el.tagName === "SELECT") {
         const label = document.querySelector(`label[for="${el.id}"]`) || el.closest("label");
-        text = `[select] ${ariaLabel || label?.innerText || el.name || 'Dropdown'}`;
+        text = `[select] ${ariaLabel || label?.innerText?.trim() || el.name || 'Dropdown'}`;
       } else {
-        // For buttons/links, try innerText first, then aria-label, then title
-        text = `[${el.tagName.toLowerCase()}] ${el.innerText?.trim() || ariaLabel || title || placeholder || 'Interactive'}`;
+        text = `[${el.tagName.toLowerCase()}] ${innerText || ariaLabel || title || placeholder || 'Interactive'}`;
       }
 
-      // Sanitize text and remove excessive whitespace
+      // Clean text
       text = text.replace(/\s+/g, ' ').trim();
-      choices.push({ choiceId: id, text: text.slice(0, 200) });
+
+      // Tag navigation cues
+      let metadata = [];
+      const navWords = ["next", "continue", "submit", "check", "finish", "done", "forward", "start", "agree"];
+      const lowerText = text.toLowerCase();
+      if (navWords.some(w => lowerText.includes(w))) {
+        metadata.push("NAV");
+      }
+
+      const rect = el.getBoundingClientRect();
+      const inViewport = (
+        rect.top >= 0 && rect.left >= 0 &&
+        rect.bottom <= (window.innerHeight || document.documentElement.clientHeight) &&
+        rect.right <= (window.innerWidth || document.documentElement.clientWidth)
+      );
+      if (inViewport) metadata.push("VISIBLE");
+
+      const choiceText = `${metadata.length ? `(${metadata.join("|")}) ` : ""}${text}`;
+      choices.push({ choiceId: id, text: choiceText.slice(0, 250), score: inViewport ? 2 : 1 });
     });
+
+    // Sort by priority (visible first)
+    choices.sort((a, b) => b.score - a.score);
 
     return { 
       task: "page_interaction",
       questionText: "Identify the next logical interaction on this page.",
-      choices: choices.slice(0, 100)
+      choices: choices.map(c => ({ choiceId: c.choiceId, text: c.text })).slice(0, 120)
     };
   }
 
   function isInteractable(el) {
-    if (el.closest("#page-qa-root")) return false;
+    if (el.closest("#page-qa-root")) return { visible: false, reason: "Inside QA UI" };
+
+    if (el.disabled || el.getAttribute("aria-disabled") === "true") {
+      return { visible: false, reason: "Disabled" };
+    }
+
     const style = window.getComputedStyle(el);
-    if (style.display === "none" || style.visibility === "hidden" || parseFloat(style.opacity) === 0) return false;
+    if (style.display === "none" || style.visibility === "hidden" || parseFloat(style.opacity) < 0.1) {
+      return { visible: false, reason: "Hidden style" };
+    }
+
     const rect = el.getBoundingClientRect();
-    if (rect.width === 0 || rect.height === 0) return false;
-    return true;
+    if (rect.width < 2 || rect.height < 2) return { visible: false, reason: "Too small" };
+
+    // Check if it's actually in the DOM and has a parent
+    if (!el.getClientRects().length) return { visible: false, reason: "No client rects" };
+
+    return { visible: true };
   }
 
   function extractVisibleText() {
-    return document.body.innerText.slice(0, 8000);
+    // Better text extraction: ignore script/style and hidden elements
+    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, {
+      acceptNode: (node) => {
+        const parent = node.parentElement;
+        if (!parent) return NodeFilter.FILTER_REJECT;
+        const tag = parent.tagName;
+        if (tag === "SCRIPT" || tag === "STYLE" || tag === "NOSCRIPT" || parent.closest("#page-qa-root")) {
+          return NodeFilter.FILTER_REJECT;
+        }
+        const style = window.getComputedStyle(parent);
+        if (style.display === "none" || style.visibility === "hidden") {
+          return NodeFilter.FILTER_REJECT;
+        }
+        return NodeFilter.FILTER_ACCEPT;
+      }
+    });
+
+    let textParts = [];
+    let node;
+    while (node = walker.nextNode()) {
+      const content = node.textContent.trim();
+      if (content) textParts.push(content);
+    }
+
+    // Join and deduplicate nearby identical lines (common in web apps)
+    let joined = textParts.join(" ");
+    return joined.replace(/\s+/g, ' ').slice(0, 10000);
   }
 
 })();

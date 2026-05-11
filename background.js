@@ -69,74 +69,56 @@ async function askGroqForAction(payload) {
   let systemPrompt = "";
   if (answerOnly) {
     systemPrompt = `
-      You are a helpful web assistant. Your goal is to answer the user's question or provide information based on the current webpage content.
+      You are a concise Web Assistant.
+      User Goal: ${userPrompt || "Explain this page."}
 
-      User Question: ${userPrompt || "What is this page about?"}
-
-      CRITICAL RULES:
+      RULES:
       1. Output ONLY valid JSON.
-      2. Provide a direct, concise answer.
-      3. Use the provided page content and interactable options to inform your answer.
+      2. Be direct and fact-based.
+      3. Use provided page content.
 
-      RESPONSE FORMAT:
+      FORMAT:
       {
-        "answer": "Your detailed answer here",
-        "reason": "Brief explanation of how you found the answer"
+        "answer": "...",
+        "reason": "..."
       }
     `;
   } else {
     systemPrompt = `
-      You are an expert Web Pilot Agent. Your goal is to navigate and complete multi-step tasks on a webpage.
-      User Goal: ${userPrompt || "Explore the page and identify any tasks to complete."}
+      You are a Web Pilot. Goal: ${userPrompt || "Complete tasks."}
 
-      CRITICAL RULES:
-      1. Output ONLY valid JSON.
-      2. Choose the most logical next action to move towards the goal.
-      3. If you just answered a question or filled a form, LOOK FOR "Next", "Submit", "Continue", or "Check" buttons to progress.
-      4. DO NOT return action: "done" until the final confirmation page is reached or the multi-step flow is truly finished.
-      5. If you provide information in the "answer" field, you MUST still provide a navigation "action" (like "click" on a "Next" button) if the task is not yet complete.
-      6. Be precise with "targetId" from the provided INTERACTABLE OPTIONS.
-      7. If you've tried an action and it didn't seem to work (check history), try a different approach or element.
+      RULES:
+      1. JSON output ONLY.
+      2. Prioritize "NAV" tagged elements to progress (Next, Submit, etc.).
+      3. "done" ONLY when goal is fully complete and no more navigation is possible.
+      4. If stuck, try different elements or "scroll".
+      5. "answer" field for user updates.
 
-      ACTION TYPES:
-      - "click": For buttons, links, or radio buttons.
-      - "type": For text inputs or textareas. Requires "text".
-      - "check": For checkboxes.
-      - "select": For dropdowns. Requires "optionText".
-      - "scroll": To see more content. Requires "direction" ("down" or "up").
-      - "hover": To trigger tooltips or menus. Requires "targetId".
-      - "key": Press a specific key (e.g., "Enter", "Escape"). Requires "key" and optional "targetId".
-      - "wait": If you expect the page to load or change after an action.
-      - "refuse": If you are stuck or cannot proceed. Provide a reason.
-      - "done": Goal fully reached (no more steps or navigation possible).
+      ACTIONS: click, type(text), check, select(optionText), scroll(direction:up/down), hover, key(key), wait, refuse, done.
 
-      RESPONSE FORMAT:
+      FORMAT:
       {
-        "action": "click" | "type" | "check" | "select" | "scroll" | "hover" | "key" | "wait" | "refuse" | "done",
+        "action": "...",
         "targetId": "el_...",
         "text": "...",
-        "optionText": "...",
-        "direction": "down" | "up",
-        "key": "...",
-        "confidence": 0.0 to 1.0,
-        "reason": "Explain why this action moves towards the goal",
-        "answer": "Any direct communication or answer for the user."
+        "reason": "...",
+        "answer": "..."
       }
     `;
   }
 
   const userContent = `
-    PAGE TITLE: ${pageTitle}
-    ${userPrompt ? `USER PROMPT: ${userPrompt}` : `TASK CONTEXT: ${questionText}`}
+    TITLE: ${pageTitle}
+    PROMPT: ${userPrompt || questionText}
 
-    INTERACTABLE OPTIONS:
-    ${choices.length > 0 ? choices.map(c => `- ${c.choiceId}: ${c.text}`).join("\n") : "None visible."}
+    OPTIONS:
+    ${choices.length > 0 ? choices.map(c => `${c.choiceId}: ${c.text}`).join("\n") : "None."}
 
-    ACTION HISTORY (Last 10 steps):
-    ${history.length > 0 ? history.slice(-10).join("\n") : "None yet."}
+    HISTORY (last 5):
+    ${history.length > 0 ? history.slice(-5).join("\n") : "None."}
 
-    PAGE TEXT CONTENT (Truncated):
-    ${visibleText.slice(0, 6000)}
+    CONTENT:
+    ${visibleText.slice(0, 15000)}
   `;
 
   let lastError = null;
@@ -147,21 +129,21 @@ async function askGroqForAction(payload) {
 
     try {
       const resp = await fetch(GROQ_ENDPOINT, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${currentKey}`
-        },
-    body: JSON.stringify({
-      model: model,
-      temperature: 0.1,
-      messages: [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: userContent }
-      ],
-      response_format: { type: "json_object" }
-    })
-  });
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${currentKey}`
+      },
+      body: JSON.stringify({
+        model: model,
+        temperature: 0,
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: userContent }
+        ],
+        response_format: { type: "json_object" }
+      })
+    });
 
       if (!resp.ok) {
         const errorData = await resp.json().catch(() => ({}));
