@@ -1,6 +1,15 @@
+/**
+ * Page QA Sidebar - Background Service Worker
+ * Handles Groq API interactions and extension action clicks.
+ */
+
 const GROQ_ENDPOINT = "https://api.groq.com/openai/v1/chat/completions";
 const DEFAULT_MODEL = "llama-3.3-70b-versatile";
 
+/**
+ * Handle extension icon clicks.
+ * Attempts to toggle the UI in the current tab, injecting scripts if necessary.
+ */
 chrome.action.onClicked.addListener(async (tab) => {
   if (!tab.id || !tab.url || !/^https?:\/\//.test(tab.url)) return;
 
@@ -18,42 +27,61 @@ chrome.action.onClicked.addListener(async (tab) => {
     });
     await sendOpenMessage(tab.id);
   } catch (err) {
-    console.error("Failed to inject script:", err);
+    console.error("Page QA Sidebar: Failed to inject script:", err);
   }
 });
 
+/**
+ * Sends an OPEN_UI message to the content script.
+ * @param {number} tabId
+ * @returns {Promise<boolean>} True if message was delivered.
+ */
 function sendOpenMessage(tabId) {
   return new Promise((resolve) => {
     chrome.tabs.sendMessage(tabId, { type: "OPEN_UI" }, () => {
-      if (chrome.runtime.lastError) resolve(false);
-      else resolve(true);
+      if (chrome.runtime.lastError) {
+        resolve(false);
+      } else {
+        resolve(true);
+      }
     });
   });
 }
 
+/**
+ * Listen for messages from content scripts or options page.
+ */
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message?.type === "ASK_GROQ_ACTION") {
     askGroqForAction(message.payload)
       .then((plan) => sendResponse({ ok: true, plan }))
-      .catch((error) => sendResponse({ ok: false, error: error.message }));
-    return true;
+      .catch((error) => {
+        console.error("Page QA Sidebar: Groq Request Failed", error);
+        sendResponse({ ok: false, error: error.message });
+      });
+    return true; // Keep message channel open for async response
   }
-  return true;
+  return false;
 });
 
+/**
+ * Communicates with Groq API to determine the next action.
+ * @param {Object} payload Data from the content script.
+ * @returns {Promise<Object>} The AI-generated plan.
+ */
 async function askGroqForAction(payload) {
   const { apiKey, selectedModel } = await chrome.storage.sync.get(["apiKey", "selectedModel"]);
-  if (!apiKey) throw new Error("API Key missing. Set it in options.");
+  if (!apiKey) {
+    throw new Error("API Key missing. Please set it in the extension options.");
+  }
 
   const model = selectedModel || DEFAULT_MODEL;
 
   const {
-    task,
-    questionText,
     choices = [],
-    visibleText,
-    pageTitle,
-    userPrompt,
+    visibleText = "",
+    pageTitle = "",
+    userPrompt = "",
     history = []
   } = payload;
 
@@ -96,7 +124,6 @@ async function askGroqForAction(payload) {
 
   const userContent = `
     PAGE TITLE: ${pageTitle}
-    TASK CONTEXT: ${questionText}
 
     INTERACTABLE OPTIONS:
     ${choices.length > 0 ? choices.map(c => `- ${c.choiceId}: ${c.text}`).join("\n") : "None visible."}
@@ -131,10 +158,15 @@ async function askGroqForAction(payload) {
   }
 
   const data = await resp.json();
+  const content = data.choices?.[0]?.message?.content;
+  if (!content) {
+    throw new Error("Empty response from Groq.");
+  }
+
   try {
-    return JSON.parse(data.choices[0].message.content);
+    return JSON.parse(content);
   } catch (e) {
-    console.error("Failed to parse AI response:", data.choices[0].message.content);
+    console.error("Page QA Sidebar: Failed to parse AI response:", content);
     throw new Error("Invalid AI response format.");
   }
 }

@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Page QA Sidebar",
   "version": "0.1.0",
-  "description": "Ask questions about visible content on the current page using Groq.",
+  "description": "Autonomous and assisted page interaction agent using Groq.",
   "permissions": [
     "storage",
     "activeTab",
